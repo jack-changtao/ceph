@@ -809,8 +809,33 @@ CEPH_RADOS_API int rados_ioctx_pool_set_auid(rados_ioctx_t io, uint64_t auid);
  */
 CEPH_RADOS_API int rados_ioctx_pool_get_auid(rados_ioctx_t io, uint64_t *auid);
 
-CEPH_RADOS_API int rados_ioctx_pool_requires_alignment(rados_ioctx_t io);
-CEPH_RADOS_API uint64_t rados_ioctx_pool_required_alignment(rados_ioctx_t io);
+/* deprecated, use rados_ioctx_pool_requires_alignment2 instead */
+CEPH_RADOS_API int rados_ioctx_pool_requires_alignment(rados_ioctx_t io)
+  __attribute__((deprecated));
+
+/**
+ * Test whether the specified pool requires alignment or not.
+ *
+ * @param io pool to query
+ * @param requires 1 if alignment is supported, 0 if not. 
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_ioctx_pool_requires_alignment2(rados_ioctx_t io,
+  int *requires);
+
+/* deprecated, use rados_ioctx_pool_required_alignment2 instead */
+CEPH_RADOS_API uint64_t rados_ioctx_pool_required_alignment(rados_ioctx_t io)
+  __attribute__((deprecated));
+
+/**
+ * Get the alignment flavor of a pool
+ *
+ * @param io pool to query
+ * @param alignment where to store the alignment flavor
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_ioctx_pool_required_alignment2(rados_ioctx_t io,
+  uint64_t *alignment);
 
 /**
  * Get the pool id of the io context
@@ -2092,6 +2117,7 @@ CEPH_RADOS_API int rados_notify(rados_ioctx_t io, const char *o, uint64_t ver,
  * -ETIMEDOUT).
  *
  * @param io the pool the object is in
+ * @param completion what to do when operation has been attempted
  * @param o the name of the object
  * @param buf data to send to watchers
  * @param buf_len length of buf in bytes
@@ -2104,6 +2130,11 @@ CEPH_RADOS_API int rados_notify2(rados_ioctx_t io, const char *o,
 				 const char *buf, int buf_len,
 				 uint64_t timeout_ms,
 				 char **reply_buffer, size_t *reply_buffer_len);
+CEPH_RADOS_API int rados_aio_notify(rados_ioctx_t io, const char *o,
+                                    rados_completion_t completion,
+                                    const char *buf, int buf_len,
+                                    uint64_t timeout_ms, char **reply_buffer,
+                                    size_t *reply_buffer_len);
 
 /**
  * Acknolwedge receipt of a notify

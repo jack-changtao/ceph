@@ -14,6 +14,7 @@ include auth/Makefile.am
 include brag/Makefile.am
 include ceph-detect-init/Makefile.am
 include crush/Makefile.am
+include kv/Makefile.am
 include mon/Makefile.am
 include mds/Makefile.am
 include os/Makefile.am
@@ -31,6 +32,7 @@ include messages/Makefile.am
 include include/Makefile.am
 include librados/Makefile.am
 include libradosstriper/Makefile.am
+include journal/Makefile.am
 include librbd/Makefile.am
 include rgw/Makefile.am
 include cls/Makefile.am
@@ -106,6 +108,7 @@ EXTRA_DIST += \
 	mount.fuse.ceph \
 	rbd-replay-many \
 	rbdmap \
+	etc-rbdmap \
 	yasm-wrapper
 
 EXTRA_DIST += \

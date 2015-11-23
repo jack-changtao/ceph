@@ -1401,7 +1401,27 @@ int RGWRados::get_required_alignment(rgw_bucket& bucket, uint64_t *alignment)
     return r;
   }
 
-  *alignment = ioctx.pool_required_alignment();
+  bool requires;
+  r = ioctx.pool_requires_alignment2(&requires);
+  if (r < 0) {
+    ldout(cct, 0) << "ERROR: ioctx.pool_requires_alignment2() returned " 
+      << r << dendl;
+    return r;
+  }
+
+  if (!requires) {
+    *alignment = 0;
+    return 0;
+  }
+
+  uint64_t align;
+  r = ioctx.pool_required_alignment2(&align);
+  if (r < 0) {
+    ldout(cct, 0) << "ERROR: ioctx.pool_required_alignment2() returned " 
+      << r << dendl;
+    return r;
+  }
+  *alignment = align;
   return 0;
 }
 
@@ -2831,6 +2851,7 @@ int RGWRados::create_bucket(RGWUserInfo& owner, rgw_bucket& bucket,
     info.placement_rule = selected_placement_rule;
     info.num_shards = bucket_index_max_shards;
     info.bucket_index_shard_hash_type = RGWBucketInfo::MOD;
+    info.requester_pays = false;
     if (!creation_time)
       time(&info.creation_time);
     else
@@ -7901,7 +7922,7 @@ int RGWRados::list_raw_objects(rgw_bucket& pool, const string& prefix_filter,
   if (!ctx.initialized) {
     int r = pool_iterate_begin(pool, ctx.iter_ctx);
     if (r < 0) {
-      lderr(cct) << "failed to list objects pool_iterate_begin() returned r=" << r << dendl;
+      ldout(cct, 10) << "failed to list objects pool_iterate_begin() returned r=" << r << dendl;
       return r;
     }
     ctx.initialized = true;
@@ -7910,7 +7931,7 @@ int RGWRados::list_raw_objects(rgw_bucket& pool, const string& prefix_filter,
   vector<RGWObjEnt> objs;
   int r = pool_iterate(ctx.iter_ctx, max, objs, is_truncated, &filter);
   if (r < 0) {
-    lderr(cct) << "failed to list objects pool_iterate returned r=" << r << dendl;
+    ldout(cct, 10) << "failed to list objects pool_iterate returned r=" << r << dendl;
     return r;
   }
 

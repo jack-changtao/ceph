@@ -396,52 +396,6 @@ void dump_log(Formatter *formatter, ostream &out, pg_log_t &log,
   formatter->flush(out);
 }
 
-//Based on RemoveWQ::_process()
-void remove_coll(ObjectStore *store, const coll_t &coll,
-		 ObjectStore::Sequencer &osr)
-{
-  spg_t pg;
-  coll.is_pg_prefix(&pg);
-  OSDriver driver(
-    store,
-    coll_t(),
-    OSD::make_snapmapper_oid());
-  SnapMapper mapper(&driver, 0, 0, 0, pg.shard);
-
-  ghobject_t next;
-  int r = 0;
-  int64_t num = 0;
-  ObjectStore::Transaction t;
-  cout << "remove_coll " << coll << std::endl;
-  while (!next.is_max()) {
-    vector<ghobject_t> objects;
-    r = store->collection_list(coll, next, ghobject_t::get_max(), true, 300,
-      &objects, &next);
-    if (r < 0)
-      return;
-    for (vector<ghobject_t>::iterator i = objects.begin();
-	 i != objects.end();
-	 ++i, ++num) {
-
-      OSDriver::OSTransaction _t(driver.get_transaction(&t));
-      cout << "remove " << *i << std::endl;
-      int r = mapper.remove_oid(i->hobj, &_t);
-      if (r != 0 && r != -ENOENT) {
-        assert(0);
-      }
-
-      t.remove(coll, *i);
-      if (num >= 30) {
-        store->apply_transaction(&osr, t);
-        t = ObjectStore::Transaction();
-        num = 0;
-      }
-    }
-  }
-  t.remove_collection(coll);
-  store->apply_transaction(&osr, t);
-}
-
 //Based on part of OSD::load_pgs()
 int finish_remove_pgs(ObjectStore *store)
 {
@@ -471,6 +425,10 @@ int finish_remove_pgs(ObjectStore *store)
   return 0;
 }
 
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 int mark_pg_for_removal(ObjectStore *fs, spg_t pgid, ObjectStore::Transaction *t)
 {
   pg_info_t info(pgid);
@@ -489,13 +447,28 @@ int mark_pg_for_removal(ObjectStore *fs, spg_t pgid, ObjectStore::Transaction *t
     cerr << __func__ << " error on read_info " << cpp_strerror(r) << std::endl;
     return r;
   }
-  assert(struct_v >= 8);
-  cout << "setting '_remove' omap key" << std::endl;
-  map<string,bufferlist> values;
-  ::encode((char)1, values["_remove"]);
-  t->omap_setkeys(coll, pgmeta_oid, values);
+  if (struct_v < 8) {
+    // old xattr
+    cout << "setting legacy 'remove' xattr flag" << std::endl;
+    bufferlist one;
+    one.append('1');
+    t->collection_setattr(coll, "remove", one);
+    cout << "remove " << coll_t::meta() << " " << log_oid << std::endl;
+    t->remove(coll_t::meta(), log_oid);
+    cout << "remove " << coll_t::meta() << " " << biginfo_oid << std::endl;
+    t->remove(coll_t::meta(), biginfo_oid);
+  } else {
+    // new omap key
+    cout << "setting '_remove' omap key" << std::endl;
+    map<string,bufferlist> values;
+    ::encode((char)1, values["_remove"]);
+    t->omap_setkeys(coll, pgmeta_oid, values);
+  }
   return 0;
 }
+
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"
 
 int initiate_new_remove_pg(ObjectStore *store, spg_t r_pgid,
 			   ObjectStore::Sequencer &osr)
@@ -727,6 +700,8 @@ int set_inc_osdmap(ObjectStore *store, epoch_t e, bufferlist& bl, bool force,
     }
     cout << "Creating a new epoch." << std::endl;
   }
+  if (dry_run)
+    return 0;
   ObjectStore::Transaction t;
   t.write(coll_t::meta(), inc_oid, 0, bl.length(), bl);
   t.truncate(coll_t::meta(), inc_oid, bl.length());
@@ -772,6 +747,8 @@ int set_osdmap(ObjectStore *store, epoch_t e, bufferlist& bl, bool force,
     }
     cout << "Creating a new epoch." << std::endl;
   }
+  if (dry_run)
+    return 0;
   ObjectStore::Transaction t;
   t.write(coll_t::meta(), full_oid, 0, bl.length(), bl);
   t.truncate(coll_t::meta(), full_oid, bl.length());
@@ -1670,6 +1647,9 @@ int do_set_attr(ObjectStore *store, coll_t coll,
   if (ret < 0)
     return ret;
 
+  if (dry_run)
+    return 0;
+
   t->touch(coll, ghobj);
 
   t->setattr(coll, ghobj, key,  bl);
@@ -1687,6 +1667,9 @@ int do_rm_attr(ObjectStore *store, coll_t coll,
 
   if (debug)
     cerr << "Rmattr " << ghobj << std::endl;
+
+  if (dry_run)
+    return 0;
 
   t->rmattr(coll, ghobj, key);
 
@@ -1743,6 +1726,9 @@ int do_set_omap(ObjectStore *store, coll_t coll,
 
   attrset.insert(pair<string, bufferlist>(key, valbl));
 
+  if (dry_run)
+    return 0;
+
   t->touch(coll, ghobj);
 
   t->omap_setkeys(coll, ghobj, attrset);
@@ -1763,6 +1749,9 @@ int do_rm_omap(ObjectStore *store, coll_t coll,
 
   if (debug)
     cerr << "Rm_omap " << ghobj << std::endl;
+
+  if (dry_run)
+    return 0;
 
   t->omap_rmkeys(coll, ghobj, keys);
 
@@ -1804,6 +1793,9 @@ int do_set_omaphdr(ObjectStore *store, coll_t coll,
   int ret = get_fd_data(fd, hdrbl);
   if (ret)
     return ret;
+
+  if (dry_run)
+    return 0;
 
   t->touch(coll, ghobj);
 
@@ -2155,6 +2147,9 @@ int remove_clone(ObjectStore *store, coll_t coll, ghobject_t &ghobj, snapid_t cl
   if (ret) return ret;
   ret = remove_from(snapset.clone_size, "clone_size", cloneid, force);
   if (ret) return ret;
+
+  if (dry_run)
+    return 0;
 
   bufferlist bl;
   ::encode(snapset, bl);
@@ -2530,12 +2525,6 @@ int main(int argc, char **argv)
     CompatSet unsupported = supported.unsupported(superblock.compat_features);
     cerr << "On-disk OSD incompatible features set "
       << unsupported << std::endl;
-    ret = -EINVAL;
-    goto out;
-  }
-  if (!superblock.compat_features.incompat.contains(CEPH_OSD_FEATURE_INCOMPAT_PGMETA)) {
-    derr << "OSD store does not have PGMETA feature." << dendl;
-    derr << "You must first upgrade to hammer, or use an older ceph-objectstore-tool." << dendl;
     ret = -EINVAL;
     goto out;
   }
@@ -3221,6 +3210,10 @@ int main(int argc, char **argv)
       cout << "Remove past-intervals " << past_intervals << std::endl;
 
       past_intervals.clear();
+      if (dry_run) {
+        ret = 0;
+        goto out;
+      }
       ret = write_info(*t, map_epoch, info, past_intervals);
 
       if (ret == 0) {
@@ -3248,11 +3241,13 @@ int main(int argc, char **argv)
       info.history.last_epoch_clean = superblock.current_epoch;
       past_intervals.clear();
 
-      ret = write_info(*t, map_epoch, info, past_intervals);
-      if (ret == 0) {
+      if (!dry_run) {
+	ret = write_info(*t, map_epoch, info, past_intervals);
+	if (ret != 0)
+	  goto out;
 	fs->apply_transaction(osr, *t);
-	cout << "Marking complete succeeded" << std::endl;
       }
+      cout << "Marking complete succeeded" << std::endl;
     } else {
       assert(!"Should have already checked for valid --op");
     }

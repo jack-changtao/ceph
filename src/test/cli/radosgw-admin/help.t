@@ -57,7 +57,8 @@
     metadata rm                remove metadata info
     metadata list              list metadata info
     mdlog list                 list metadata log
-    mdlog trim                 trim metadata log
+    mdlog trim                 trim metadata log (use start-date, end-date or
+                               start-marker, end-marker)
     bilog list                 list bucket index log
     bilog trim                 trim bucket index log (use start-marker, end-marker)
     datalog list               list data log
@@ -126,7 +127,6 @@
      --caps=<caps>             list of caps (e.g., "usage=read, write; user=read"
      --yes-i-really-mean-it    required for certain operations
      --reset-regions           reset regionmap when regionmap update
- 
   <date> := "YYYY-MM-DD[ hh:mm:ss]"
   
   Quota options:
@@ -144,3 +144,4 @@
     --version         show version and quit
   
   [1]
+ 

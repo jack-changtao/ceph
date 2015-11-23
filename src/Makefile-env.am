@@ -80,13 +80,33 @@ HARDENING_LDFLAGS =  \
 AM_COMMON_CPPFLAGS = \
 	-D__CEPH__ \
 	-D_FILE_OFFSET_BITS=64 \
-	-D_REENTRANT \
 	-D_THREAD_SAFE \
 	-D__STDC_FORMAT_MACROS \
 	-D_GNU_SOURCE \
 	-DCEPH_LIBDIR=\"${libdir}\" \
 	-DCEPH_PKGLIBDIR=\"${pkglibdir}\" \
 	-DGTEST_USE_OWN_TR1_TUPLE=0
+
+if LINUX
+AM_COMMON_CPPFLAGS += \
+	-D_REENTRANT
+endif
+
+if FREEBSD 
+AM_COMMON_CPPFLAGS += \
+	-D_REENTRANT
+endif
+
+if DARWIN 
+AM_COMMON_CPPFLAGS += \
+	-D_REENTRANT
+endif
+
+if SOLARIS
+AM_COMMON_CPPFLAGS += \
+       -D_PTHREADS \
+       -D_POSIX_C_SOURCE
+endif
 
 AM_COMMON_CFLAGS = \
 	-Wall \
@@ -100,6 +120,9 @@ AM_COMMON_CFLAGS = \
 if !CLANG
 	AM_COMMON_CFLAGS += -rdynamic
 endif
+if SOLARIS
+	AM_COMMON_CFLAGS += -Wno-unused-local-typedefs
+endif
 
 AM_CFLAGS = $(AM_COMMON_CFLAGS) $(HARDENING_CFLAGS)
 AM_CPPFLAGS = $(AM_COMMON_CPPFLAGS)
@@ -111,6 +134,11 @@ AM_CXXFLAGS = \
 	-Wno-invalid-offsetof $(HARDENING_CFLAGS)
 if !CLANG
 	AM_CXXFLAGS += -Wstrict-null-sentinel
+endif
+
+# solaris harding
+if SOLARIS
+	AM_CXXFLAGS += -lssp_nonshared
 endif
 
 # note: this is position dependant, it affects the -l options that
@@ -169,6 +197,7 @@ LIBMSG = libmsg.la
 LIBCRUSH = libcrush.la
 LIBCOMPRESSOR = libcompressor.la -lsnappy
 LIBJSON_SPIRIT = libjson_spirit.la
+LIBKV = libkv.a
 LIBLOG = liblog.la
 LIBOS = libos.a
 LIBOS_TYPES = libos_types.a
@@ -228,12 +257,12 @@ LIBMDS += $(LIBPERFGLUE)
 # OSD needs types
 LIBOSD += $(LIBOSD_TYPES) $(LIBOS_TYPES)
 
-# libos linking order is ornery
-LIBOS += $(LIBOS_TYPES)
+# libkv/libos linking order is ornery
 if WITH_SLIBROCKSDB
-LIBOS += rocksdb/librocksdb.a
+LIBKV += rocksdb/librocksdb.a
 endif
-LIBOS += -lbz2 -lz -lleveldb -lsnappy
+LIBKV += -lbz2 -lz -lleveldb -lsnappy
+LIBOS += $(LIBOS_TYPES) $(LIBKV)
 
 LIBMON += $(LIBMON_TYPES)
 

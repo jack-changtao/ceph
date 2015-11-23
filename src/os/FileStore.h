@@ -152,8 +152,6 @@ private:
   // ObjectMap
   boost::scoped_ptr<ObjectMap> object_map;
   
-  Finisher ondisk_finisher;
-
   // helper fns
   int get_cdir(coll_t cid, char *s, int len);
   
@@ -201,6 +199,7 @@ private:
   public:
     Sequencer *parent;
     Mutex apply_lock;  // for apply mutual exclusion
+    int id;
     
     /// get_max_uncompleted
     bool _get_max_uncompleted(
@@ -315,10 +314,11 @@ private:
       }
     }
 
-    OpSequencer()
+    OpSequencer(int i)
       : qlock("FileStore::OpSequencer::qlock", false, false),
 	parent(0),
-	apply_lock("FileStore::OpSequencer::apply_lock", false, false) {}
+	apply_lock("FileStore::OpSequencer::apply_lock", false, false),
+        id(i) {}
     ~OpSequencer() {
       assert(q.empty());
     }
@@ -333,9 +333,13 @@ private:
   FDCache fdcache;
   WBThrottle wbthrottle;
 
+  atomic_t next_osr_id;
   deque<OpSequencer*> op_queue;
   Throttle throttle_ops, throttle_bytes;
-  Finisher op_finisher;
+  const int m_ondisk_finisher_num;
+  const int m_apply_finisher_num;
+  vector<Finisher*> ondisk_finishers;
+  vector<Finisher*> apply_finishers;
 
   ThreadPool op_tp;
   struct OpWQ : public ThreadPool::WorkQueue<OpSequencer> {
@@ -610,6 +614,13 @@ public:
   int _rmattrs(coll_t cid, const ghobject_t& oid,
 	       const SequencerPosition &spos);
 
+  int collection_getattr(coll_t c, const char *name, void *value, size_t size);
+  int collection_getattr(coll_t c, const char *name, bufferlist& bl);
+  int collection_getattrs(coll_t cid, map<string,bufferptr> &aset);
+
+  int _collection_setattr(coll_t c, const char *name, const void *value, size_t size);
+  int _collection_rmattr(coll_t c, const char *name);
+  int _collection_setattrs(coll_t cid, map<string,bufferptr> &aset);
   int _collection_remove_recursive(const coll_t &cid,
 				   const SequencerPosition &spos);
 

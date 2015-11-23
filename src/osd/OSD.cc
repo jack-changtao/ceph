@@ -480,11 +480,15 @@ void OSDService::init()
   reserver_finisher.start();
   objecter_finisher.start();
   objecter->set_client_incarnation(0);
-  objecter->start();
   watch_timer.init();
   agent_timer.init();
 
   agent_thread.create();
+}
+
+void OSDService::final_init()
+{
+  objecter->start();
 }
 
 void OSDService::activate_map()
@@ -1017,13 +1021,13 @@ void OSDService::set_epochs(const epoch_t *_boot_epoch, const epoch_t *_up_epoch
 bool OSDService::prepare_to_stop()
 {
   Mutex::Locker l(is_stopping_lock);
-  if (state != NOT_STOPPING)
+  if (get_state() != NOT_STOPPING)
     return false;
 
   OSDMapRef osdmap = get_osdmap();
   if (osdmap && osdmap->is_up(whoami)) {
     dout(0) << __func__ << " telling mon we are shutting down" << dendl;
-    state = PREPARING_TO_STOP;
+    set_state(PREPARING_TO_STOP);
     monc->send_mon_message(new MOSDMarkMeDown(monc->get_fsid(),
 					      osdmap->get_inst(whoami),
 					      osdmap->get_epoch(),
@@ -1033,27 +1037,26 @@ bool OSDService::prepare_to_stop()
     utime_t timeout;
     timeout.set_from_double(now + cct->_conf->osd_mon_shutdown_timeout);
     while ((ceph_clock_now(cct) < timeout) &&
-	   (state != STOPPING)) {
+       (get_state() != STOPPING)) {
       is_stopping_cond.WaitUntil(is_stopping_lock, timeout);
     }
   }
   dout(0) << __func__ << " starting shutdown" << dendl;
-  state = STOPPING;
+  set_state(STOPPING);
   return true;
 }
 
 void OSDService::got_stop_ack()
 {
   Mutex::Locker l(is_stopping_lock);
-  if (state == PREPARING_TO_STOP) {
+  if (get_state() == PREPARING_TO_STOP) {
     dout(0) << __func__ << " starting shutdown" << dendl;
-    state = STOPPING;
+    set_state(STOPPING);
     is_stopping_cond.Signal();
   } else {
     dout(10) << __func__ << " ignoring msg" << dendl;
   }
 }
-
 
 MOSDMap *OSDService::build_incremental_map_msg(epoch_t since, epoch_t to,
                                                OSDSuperblock& sblock)
@@ -1351,7 +1354,11 @@ int OSD::mkfs(CephContext *cct, ObjectStore *store, const string &dev,
     bufferlist sbbl;
     ret = store->read(coll_t::meta(), OSD_SUPERBLOCK_POBJECT, 0, 0, sbbl);
     if (ret >= 0) {
+      /* if we already have superblock, check content of superblock */
       dout(0) << " have superblock" << dendl;
+      bufferlist::iterator p;
+      p = sbbl.begin();
+      ::decode(sb, p);
       if (whoami != sb.whoami) {
 	derr << "provided osd id " << whoami << " != superblock's " << sb.whoami << dendl;
 	ret = -EINVAL;
@@ -1665,12 +1672,14 @@ bool OSD::asok_command(string command, cmdmap_t& cmdmap, string format,
     store->flush_journal();
   } else if (command == "dump_ops_in_flight" ||
 	     command == "ops") {
+    RWLock::RLocker l(op_tracker.lock);
     if (!op_tracker.tracking_enabled) {
       ss << "op_tracker tracking is not enabled";
     } else {
       op_tracker.dump_ops_in_flight(f);
     }
   } else if (command == "dump_historic_ops") {
+    RWLock::RLocker l(op_tracker.lock);
     if (!op_tracker.tracking_enabled) {
       ss << "op_tracker tracking is not enabled";
     } else {
@@ -1799,17 +1808,19 @@ int OSD::init()
 
   dout(2) << "boot" << dendl;
 
+  // initialize the daily loadavg with current 15min loadavg
+  double loadavgs[3];
+  if (getloadavg(loadavgs, 3) == 3) {
+    daily_loadavg = loadavgs[2];
+  } else {
+    derr << "OSD::init() : couldn't read loadavgs\n" << dendl;
+    daily_loadavg = 1.0;
+  }
+
   // read superblock
   r = read_superblock();
   if (r < 0) {
     derr << "OSD::init() : unable to read osd superblock" << dendl;
-    r = -EINVAL;
-    goto out;
-  }
-
-  if (!superblock.compat_features.incompat.contains(CEPH_OSD_FEATURE_INCOMPAT_PGMETA)) {
-    derr << "OSD store does not have PGMETA feature." << dendl;
-    derr << "You must first upgrade to hammer." << dendl;
     r = -EINVAL;
     goto out;
   }
@@ -1958,6 +1969,10 @@ int OSD::init()
   if (is_stopping())
     return 0;
 
+  // start objecter *after* we have authenticated, so that we don't ignore
+  // the OSDMaps it requests.
+  service.final_init();
+
   check_config();
 
   dout(10) << "ensuring pgs have consumed prior maps" << dendl;
@@ -1966,6 +1981,9 @@ int OSD::init()
 
   dout(0) << "done with init, starting boot process" << dendl;
   set_state(STATE_BOOTING);
+
+  // we don't need to ask for an osdmap here; objecter will
+
   start_boot();
 
   return 0;
@@ -3852,8 +3870,12 @@ void OSD::heartbeat()
 
   // get CPU load avg
   double loadavgs[1];
-  if (getloadavg(loadavgs, 1) == 1)
+  int n_samples = 86400 / cct->_conf->osd_heartbeat_interval;
+  if (getloadavg(loadavgs, 1) == 1) {
     logger->set(l_osd_loadavg, 100 * loadavgs[0]);
+    daily_loadavg = (daily_loadavg * (n_samples - 1) + loadavgs[0]) / n_samples;
+    dout(30) << "heartbeat: daily_loadavg " << daily_loadavg << dendl;
+  }
 
   dout(30) << "heartbeat checking stats" << dendl;
 
@@ -5597,9 +5619,9 @@ void OSD::ms_fast_preprocess(Message *m)
       MOSDMap *mm = static_cast<MOSDMap*>(m);
       Session *s = static_cast<Session*>(m->get_connection()->get_priv());
       if (s) {
-	s->received_map_lock.Lock();
+	s->received_map_lock.lock();
 	s->received_map_epoch = mm->get_last();
-	s->received_map_lock.Unlock();
+	s->received_map_lock.unlock();
 	s->put();
       }
     }
@@ -5813,9 +5835,9 @@ bool OSD::dispatch_op_fast(OpRequestRef& op, OSDMapRef& osdmap)
     Session *s = static_cast<Session*>(op->get_req()->
 				       get_connection()->get_priv());
     if (s) {
-      s->received_map_lock.Lock();
+      s->received_map_lock.lock();
       epoch_t received_epoch = s->received_map_epoch;
-      s->received_map_lock.Unlock();
+      s->received_map_lock.unlock();
       if (received_epoch < msg_epoch) {
 	osdmap_subscribe(msg_epoch, false);
       }
@@ -6055,23 +6077,35 @@ bool OSD::scrub_time_permit(utime_t now)
 
 bool OSD::scrub_load_below_threshold()
 {
-  double loadavgs[1];
-  if (getloadavg(loadavgs, 1) != 1) {
+  double loadavgs[3];
+  if (getloadavg(loadavgs, 3) != 3) {
     dout(10) << __func__ << " couldn't read loadavgs\n" << dendl;
     return false;
   }
 
-  if (loadavgs[0] >= cct->_conf->osd_scrub_load_threshold) {
-    dout(20) << __func__ << " loadavg " << loadavgs[0]
-	     << " >= max " << cct->_conf->osd_scrub_load_threshold
-	     << " = no, load too high" << dendl;
-    return false;
-  } else {
+  // allow scrub if below configured threshold
+  if (loadavgs[0] < cct->_conf->osd_scrub_load_threshold) {
     dout(20) << __func__ << " loadavg " << loadavgs[0]
 	     << " < max " << cct->_conf->osd_scrub_load_threshold
 	     << " = yes" << dendl;
     return true;
   }
+
+  // allow scrub if below daily avg and currently decreasing
+  if (loadavgs[0] < daily_loadavg && loadavgs[0] < loadavgs[2]) {
+    dout(20) << __func__ << " loadavg " << loadavgs[0]
+	     << " < daily_loadavg " << daily_loadavg
+	     << " and < 15m avg " << loadavgs[2]
+	     << " = yes" << dendl;
+    return true;
+  }
+
+  dout(20) << __func__ << " loadavg " << loadavgs[0]
+	   << " >= max " << cct->_conf->osd_scrub_load_threshold
+	   << " and ( >= daily_loadavg " << daily_loadavg
+	   << " or >= 15m avg " << loadavgs[2]
+	   << ") = no" << dendl;
+  return false;
 }
 
 void OSD::sched_scrub()
@@ -6534,16 +6568,17 @@ void OSD::handle_osd_map(MOSDMap *m)
     dout(10) << " msg say newest map is " << m->newest_map << ", requesting more" << dendl;
     osdmap_subscribe(osdmap->get_epoch()+1, true);
   }
+  else if (do_shutdown) {
+    osd_lock.Unlock();
+    shutdown();
+    osd_lock.Lock();
+  }
   else if (is_booting()) {
     start_boot();  // retry
   }
   else if (do_restart)
     start_boot();
 
-  osd_lock.Unlock();
-  if (do_shutdown)
-    shutdown();
-  osd_lock.Lock();
 
   m->put();
 }
@@ -8039,17 +8074,24 @@ public:
   void finish(ThreadPool::TPHandle& tp) {
     OSD::Session *session = static_cast<OSD::Session *>(
         con->get_priv());
+    epoch_t last_sent_epoch;
     if (session) {
-      session->sent_epoch_lock.Lock();
+      session->sent_epoch_lock.lock();
+      last_sent_epoch = session->last_sent_epoch;
+      session->sent_epoch_lock.unlock();
     }
     osd->service.share_map(
 	name,
         con.get(),
         map_epoch,
         osdmap,
-        session ? &session->last_sent_epoch : NULL);
+        session ? &last_sent_epoch : NULL);
     if (session) {
-      session->sent_epoch_lock.Unlock();
+      session->sent_epoch_lock.lock();
+      if (session->last_sent_epoch < last_sent_epoch) {
+	session->last_sent_epoch = last_sent_epoch;	
+      }
+      session->sent_epoch_lock.unlock();
       session->put();
     }
   }
@@ -8088,14 +8130,16 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
   send_map_on_destruct share_map(this, m, osdmap, m->get_map_epoch());
   Session *client_session =
       static_cast<Session*>(m->get_connection()->get_priv());
+  epoch_t last_sent_epoch;
   if (client_session) {
-    client_session->sent_epoch_lock.Lock();
+    client_session->sent_epoch_lock.lock();
+    last_sent_epoch = client_session->last_sent_epoch;
+    client_session->sent_epoch_lock.unlock();
   }
   share_map.should_send = service.should_share_map(
       m->get_source(), m->get_connection().get(), m->get_map_epoch(),
-      osdmap, &client_session->last_sent_epoch);
+      osdmap, client_session ? &last_sent_epoch : NULL);
   if (client_session) {
-    client_session->sent_epoch_lock.Unlock();
     client_session->put();
   }
 
@@ -8120,6 +8164,17 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
     // missing pool or acting set empty -- drop
     return;
   }
+
+  PG *pg = get_pg_or_queue_for_pg(pgid, op);
+  if (pg) {
+    op->send_map_update = share_map.should_send;
+    op->sent_epoch = m->get_map_epoch();
+    enqueue_op(pg, op);
+    share_map.should_send = false;
+    return;
+  }
+
+  // ok, we didn't have the PG.  let's see if it's our fault or the client's.
 
   OSDMapRef send_map = service.try_get_map(m->get_map_epoch());
   // check send epoch
@@ -8160,14 +8215,6 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
 	    << dendl;
     return;
   }
-
-  PG *pg = get_pg_or_queue_for_pg(pgid, op);
-  if (pg) {
-    op->send_map_update = share_map.should_send;
-    op->sent_epoch = m->get_map_epoch();
-    enqueue_op(pg, op);
-    share_map.should_send = false;
-  }
 }
 
 template<typename T, int MSGTYPE>
@@ -8192,15 +8239,17 @@ void OSD::handle_replica_op(OpRequestRef& op, OSDMapRef& osdmap)
   bool should_share_map = false;
   Session *peer_session =
       static_cast<Session*>(m->get_connection()->get_priv());
+  epoch_t last_sent_epoch;
   if (peer_session) {
-    peer_session->sent_epoch_lock.Lock();
+    peer_session->sent_epoch_lock.lock();
+    last_sent_epoch = peer_session->last_sent_epoch;
+    peer_session->sent_epoch_lock.unlock();
   }
   should_share_map = service.should_share_map(
       m->get_source(), m->get_connection().get(), m->map_epoch,
       osdmap,
-      peer_session ? &peer_session->last_sent_epoch : NULL);
+      peer_session ? &last_sent_epoch : NULL);
   if (peer_session) {
-    peer_session->sent_epoch_lock.Unlock();
     peer_session->put();
   }
 
@@ -8394,17 +8443,24 @@ void OSD::dequeue_op(
   if (op->send_map_update) {
     Message *m = op->get_req();
     Session *session = static_cast<Session *>(m->get_connection()->get_priv());
+    epoch_t last_sent_epoch;
     if (session) {
-      session->sent_epoch_lock.Lock();
+      session->sent_epoch_lock.lock();
+      last_sent_epoch = session->last_sent_epoch;
+      session->sent_epoch_lock.unlock();
     }
     service.share_map(
         m->get_source(),
         m->get_connection().get(),
         op->sent_epoch,
         osdmap,
-        session ? &session->last_sent_epoch : NULL);
+        session ? &last_sent_epoch : NULL);
     if (session) {
-      session->sent_epoch_lock.Unlock();
+      session->sent_epoch_lock.lock();
+      if (session->last_sent_epoch < last_sent_epoch) {
+	session->last_sent_epoch = last_sent_epoch;
+      }
+      session->sent_epoch_lock.unlock();
       session->put();
     }
   }
@@ -8513,6 +8569,7 @@ const char** OSD::get_tracked_conf_keys() const
     "osd_min_recovery_priority",
     "osd_op_complaint_time", "osd_op_log_threshold",
     "osd_op_history_size", "osd_op_history_duration",
+    "osd_enable_op_tracker",
     "osd_map_cache_size",
     "osd_map_max_advance",
     "osd_pg_epoch_persisted_max_stale",
@@ -8548,6 +8605,9 @@ void OSD::handle_conf_change(const struct md_config_t *conf,
       changed.count("osd_op_history_duration")) {
     op_tracker.set_history_size_and_duration(cct->_conf->osd_op_history_size,
                                              cct->_conf->osd_op_history_duration);
+  }
+  if (changed.count("osd_enable_op_tracker")) {
+      op_tracker.set_tracking(cct->_conf->osd_enable_op_tracker);
   }
   if (changed.count("osd_disk_thread_ioprio_class") ||
       changed.count("osd_disk_thread_ioprio_priority")) {

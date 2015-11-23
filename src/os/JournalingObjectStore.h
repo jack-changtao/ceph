@@ -17,6 +17,7 @@
 
 #include "ObjectStore.h"
 #include "Journal.h"
+#include "FileJournal.h"
 #include "common/RWLock.h"
 
 class JournalingObjectStore : public ObjectStore {
@@ -116,9 +117,7 @@ protected:
   void journal_write_close();
   int journal_replay(uint64_t fs_op_seq);
 
-  int _op_journal_transactions_prepare(
-    list<ObjectStore::Transaction*>& tls, bufferlist& tbl);
-  void _op_journal_transactions(bufferlist& tls, int data_align, uint64_t op,
+  void _op_journal_transactions(bufferlist& tls, uint32_t orig_len, uint64_t op,
 				Context *onjournal, TrackedOpRef osd_op);
 
   virtual int do_transactions(list<ObjectStore::Transaction*>& tls, uint64_t op_seq) = 0;
@@ -138,7 +137,9 @@ public:
       finisher(g_ceph_context),
       apply_manager(journal, finisher),
       replaying(false) {}
-  
+
+  ~JournalingObjectStore() {
+  }
 };
 
 #endif

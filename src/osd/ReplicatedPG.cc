@@ -1496,6 +1496,23 @@ void ReplicatedPG::do_op(OpRequestRef& op)
     }
   }
 
+  if ((m->get_flags() & (CEPH_OSD_FLAG_BALANCE_READS |
+			 CEPH_OSD_FLAG_LOCALIZE_READS)) &&
+      op->may_read() &&
+      !(op->may_write() || op->may_cache())) {
+    // balanced reads; any replica will do
+    if (!(is_primary() || is_replica())) {
+      osd->handle_misdirected_op(this, op);
+      return;
+    }
+  } else {
+    // normal case; must be primary
+    if (!is_primary()) {
+      osd->handle_misdirected_op(this, op);
+      return;
+    }
+  }
+
   if (op->includes_pg_op()) {
     if (pg_op_must_wait(m)) {
       wait_for_all_missing(op);
@@ -1715,8 +1732,8 @@ void ReplicatedPG::do_op(OpRequestRef& op)
     // CEPH_OSD_FLAG_LOCALIZE_READS set, we just return -EAGAIN. Otherwise,
     // we have to wait for the object.
     if (is_primary() ||
-	(!(m->has_flag(CEPH_OSD_FLAG_BALANCE_READS) &&
-	 !(m->has_flag(CEPH_OSD_FLAG_LOCALIZE_READS))))) {
+	(!(m->has_flag(CEPH_OSD_FLAG_BALANCE_READS)) &&
+	 !(m->has_flag(CEPH_OSD_FLAG_LOCALIZE_READS)))) {
       // missing the specific snap we need; requeue and wait.
       assert(!op->may_write()); // only happens on a read/cache
       wait_for_unreadable_object(missing_oid, op);
@@ -4923,9 +4940,13 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    // category is no longer implemented.
 	  }
           if (result >= 0) {
+	    bool is_whiteout = obs.exists && oi.is_whiteout();
 	    if (maybe_create_new_object(ctx)) {
-              ctx->mod_desc.create();
+	      ctx->mod_desc.create();
 	      t->touch(soid);
+	    } else if (is_whiteout) {
+	      // to change whiteout to non-whiteout, it need an op to update xattr
+	      t->nop();
 	    }
           }
 	}
@@ -5319,7 +5340,8 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  ::encode(m, newbl);
 	  newop.indata = newbl;
 	}
-	do_osd_ops(ctx, nops);
+	result = do_osd_ops(ctx, nops);
+	assert(result == 0);
       }
       break;
 
@@ -5365,7 +5387,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  iter->upper_bound(start_after);
 	  for (uint64_t i = 0;
 	       i < max_return && iter->valid();
-	       ++i, iter->next()) {
+	       ++i, iter->next(false)) {
 	    out_set.insert(iter->key());
 	  }
 	} // else return empty out_set
@@ -5407,7 +5429,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  for (uint64_t i = 0;
 	       i < max_return && iter->valid() &&
 		 iter->key().substr(0, filter_prefix.size()) == filter_prefix;
-	       ++i, iter->next()) {
+	       ++i, iter->next(false)) {
 	    dout(20) << "Found key " << iter->key() << dendl;
 	    out_set.insert(make_pair(iter->key(), iter->value()));
 	  }
@@ -5533,7 +5555,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     case CEPH_OSD_OP_OMAPSETVALS:
       if (!pool.info.supports_omap()) {
 	result = -EOPNOTSUPP;
-	tracepoint(osd, do_osd_op_pre_omapsetvals, soid.oid.name.c_str(), soid.snap.val, "???");
+	tracepoint(osd, do_osd_op_pre_omapsetvals, soid.oid.name.c_str(), soid.snap.val);
 	break;
       }
       ctx->mod_desc.mark_unrollbackable();
@@ -5542,23 +5564,28 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (maybe_create_new_object(ctx)) {
 	  t->touch(soid);
 	}
-	map<string, bufferlist> to_set;
+	bufferlist to_set_bl;
 	try {
-	  ::decode(to_set, bp);
+	  decode_str_str_map_to_bl(bp, &to_set_bl);
 	}
 	catch (buffer::error& e) {
 	  result = -EINVAL;
-	  tracepoint(osd, do_osd_op_pre_omapsetvals, soid.oid.name.c_str(), soid.snap.val, "???");
+	  tracepoint(osd, do_osd_op_pre_omapsetvals, soid.oid.name.c_str(), soid.snap.val);
 	  goto fail;
 	}
-	tracepoint(osd, do_osd_op_pre_omapsetvals, soid.oid.name.c_str(), soid.snap.val, list_keys(to_set).c_str());
-	dout(20) << "setting vals: " << dendl;
-	for (map<string, bufferlist>::iterator i = to_set.begin();
-	     i != to_set.end();
-	     ++i) {
-	  dout(20) << "\t" << i->first << dendl;
+	tracepoint(osd, do_osd_op_pre_omapsetvals, soid.oid.name.c_str(), soid.snap.val);
+	if (g_ceph_context->_conf->subsys.should_gather(dout_subsys, 20)) {
+	  dout(20) << "setting vals: " << dendl;
+	  map<string,bufferlist> to_set;
+	  bufferlist::iterator pt = to_set_bl.begin();
+	  ::decode(to_set, pt);
+	  for (map<string, bufferlist>::iterator i = to_set.begin();
+	       i != to_set.end();
+	       ++i) {
+	    dout(20) << "\t" << i->first << dendl;
+	  }
 	}
-	t->omap_setkeys(soid, to_set);
+	t->omap_setkeys(soid, to_set_bl);
 	ctx->delta_stats.num_wr++;
       }
       obs.oi.set_flag(object_info_t::FLAG_OMAP);
@@ -5608,7 +5635,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     case CEPH_OSD_OP_OMAPRMKEYS:
       if (!pool.info.supports_omap()) {
 	result = -EOPNOTSUPP;
-	tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val, "???");
+	tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val);
 	break;
       }
       ctx->mod_desc.mark_unrollbackable();
@@ -5616,21 +5643,21 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       {
 	if (!obs.exists || oi.is_whiteout()) {
 	  result = -ENOENT;
-	  tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val, "???");
+	  tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val);
 	  break;
 	}
 	t->touch(soid);
-	set<string> to_rm;
+	bufferlist to_rm_bl;
 	try {
-	  ::decode(to_rm, bp);
+	  decode_str_set_to_bl(bp, &to_rm_bl);
 	}
 	catch (buffer::error& e) {
 	  result = -EINVAL;
-	  tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val, "???");
+	  tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val);
 	  goto fail;
 	}
-	tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val, list_entries(to_rm).c_str());
-	t->omap_rmkeys(soid, to_rm);
+	tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val);
+	t->omap_rmkeys(soid, to_rm_bl);
 	ctx->delta_stats.num_wr++;
       }
       obs.oi.set_flag(object_info_t::FLAG_OMAP);
@@ -6803,7 +6830,7 @@ int ReplicatedPG::fill_in_copy_get(
 	osd->store->get_omap_iterator(coll, ghobject_t(oi.soid));
       assert(iter);
       iter->upper_bound(cursor.omap_offset);
-      for (; iter->valid(); iter->next()) {
+      for (; iter->valid(); iter->next(false)) {
 	++omap_keys;
 	::encode(iter->key(), omap_data);
 	::encode(iter->value(), omap_data);
@@ -11499,7 +11526,6 @@ bool ReplicatedPG::agent_work(int start_max, int agent_flush_quota)
   if (++agent_state->hist_age > g_conf->osd_agent_hist_halflife) {
     dout(20) << __func__ << " resetting atime and temp histograms" << dendl;
     agent_state->hist_age = 0;
-    agent_state->atime_hist.decay();
     agent_state->temp_hist.decay();
   }
 
@@ -11706,42 +11732,15 @@ bool ReplicatedPG::agent_maybe_evict(ObjectContextRef& obc)
 
   if (agent_state->evict_mode != TierAgentState::EVICT_MODE_FULL) {
     // is this object old and/or cold enough?
-    int atime = -1, temp = 0;
+    int temp = 0;
+    uint64_t temp_upper = 0, temp_lower = 0;
     if (hit_set)
-      agent_estimate_atime_temp(soid, &atime, NULL /*FIXME &temp*/);
-
-    uint64_t atime_upper = 0, atime_lower = 0;
-    if (atime < 0 && obc->obs.oi.mtime != utime_t()) {
-      if (obc->obs.oi.local_mtime != utime_t()) {
-        atime = ceph_clock_now(NULL).sec() - obc->obs.oi.local_mtime;
-      } else {
-        atime = ceph_clock_now(NULL).sec() - obc->obs.oi.mtime;
-      }
-    }
-    if (atime < 0) {
-      if (hit_set) {
-        atime = pool.info.hit_set_period * pool.info.hit_set_count; // "infinite"
-      } else {
-	atime_upper = 1000000;
-      }
-    }
-    if (atime >= 0) {
-      agent_state->atime_hist.add(atime);
-      agent_state->atime_hist.get_position_micro(atime, &atime_lower,
-						 &atime_upper);
-    }
-
-    unsigned temp_upper = 0, temp_lower = 0;
-    /*
-    // FIXME: bound atime based on creation time?
-    agent_state->temp_hist.add(atime);
+      agent_estimate_temp(soid, &temp);
+    agent_state->temp_hist.add(temp);
     agent_state->temp_hist.get_position_micro(temp, &temp_lower, &temp_upper);
-    */
 
     dout(20) << __func__
-	     << " atime " << atime
-	     << " pos " << atime_lower << "-" << atime_upper
-	     << ", temp " << temp
+	     << " temp " << temp
 	     << " pos " << temp_lower << "-" << temp_upper
 	     << ", evict_effort " << agent_state->evict_effort
 	     << dendl;
@@ -11754,9 +11753,7 @@ bool ReplicatedPG::agent_maybe_evict(ObjectContextRef& obc)
     delete f;
     *_dout << dendl;
 
-    // FIXME: ignore temperature for now.
-
-    if (1000000 - atime_upper >= agent_state->evict_effort)
+    if (1000000 - temp_upper >= agent_state->evict_effort)
       return false;
   }
 
@@ -12040,32 +12037,21 @@ bool ReplicatedPG::agent_choose_mode(bool restart, OpRequestRef op)
   return requeued;
 }
 
-void ReplicatedPG::agent_estimate_atime_temp(const hobject_t& oid,
-					     int *atime, int *temp)
+void ReplicatedPG::agent_estimate_temp(const hobject_t& oid, int *temp)
 {
   assert(hit_set);
-  *atime = -1;
-  if (temp)
-    *temp = 0;
-  if (hit_set->contains(oid)) {
-    *atime = 0;
-    if (temp)
-      ++(*temp);
-    else
-      return;
-  }
-  time_t now = ceph_clock_now(NULL).sec();
+  assert(temp);
+  *temp = 0;
+  if (hit_set->contains(oid))
+    *temp = 1000000;
+  unsigned i = 0;
+  int last_n = pool.info.hit_set_search_last_n;
   for (map<time_t,HitSetRef>::reverse_iterator p =
-	 agent_state->hit_set_map.rbegin();
-       p != agent_state->hit_set_map.rend();
-       ++p) {
+       agent_state->hit_set_map.rbegin(); last_n > 0 &&
+       p != agent_state->hit_set_map.rend(); ++p, ++i) {
     if (p->second->contains(oid)) {
-      if (*atime < 0)
-	*atime = now - p->first;
-      if (temp)
-	++(*temp);
-      else
-	return;
+      *temp += pool.info.get_grade(i);
+      --last_n;
     }
   }
 }
@@ -12206,7 +12192,7 @@ void ReplicatedPG::_scrub(
   boost::optional<hobject_t> head;
   boost::optional<SnapSet> snapset; // If initialized so will head (above)
   vector<snapid_t>::reverse_iterator curclone; // Defined only if snapset initialized
-  bool missing = false;
+  unsigned missing = 0;
 
   bufferlist last_data;
 
@@ -12336,7 +12322,7 @@ void ReplicatedPG::_scrub(
 
       // Set this as a new head object
       head = soid;
-      missing = false;
+      missing = 0;
 
       dout(20) << __func__ << " " << mode << " new head " << head << dendl;
 

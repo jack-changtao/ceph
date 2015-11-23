@@ -511,6 +511,7 @@ target_link_libraries(ceph-dencoder
   mds
   mon
   osdc
+  journal
   cls_lock_client
   cls_refcount_client
   cls_log_client
@@ -519,6 +520,7 @@ target_link_libraries(ceph-dencoder
   cls_replica_log_client
   cls_kvs
   cls_user_client
+  cls_journal_client
   ${DENCODER_EXTRALIBS}
   blkid
   udev
@@ -570,6 +572,9 @@ if(${HAVE_XFS})
     os/XfsFileStoreBackend.cc
     os/fs/XFS.cc)
 endif(${HAVE_XFS})
+set(libkv_srcs
+  kv/LevelDBStore.cc
+  kv/KeyValueDB.cc)
 set(libos_srcs
   os/FileJournal.cc
   os/FileStore.cc
@@ -578,7 +583,6 @@ set(libos_srcs
   os/JournalingObjectStore.cc
   os/LFNIndex.cc
   os/IndexManager.cc
-  os/LevelDBStore.cc
   os/DBObjectMap.cc 
   os/Transaction.cc
   os/WBThrottle.cc
@@ -586,17 +590,17 @@ set(libos_srcs
   os/BtrfsFileStoreBackend.cc
   os/ZFSFileStoreBackend.cc
   os/KeyValueStore.cc
-  os/KeyValueDB.cc
   os/MemStore.cc
   os/GenericObjectMap.cc
   os/HashIndex.cc
   os/newstore/NewStore.cc
   os/newstore/newstore_types.cc
   os/fs/FS.cc
+  ${libkv_srcs}
   ${libos_xfs_srcs})
 
 set(os_mon_files
-  os/LevelDBStore.cc)
+  kv/LevelDBStore.cc)
 add_library(os_mon_objs OBJECT ${os_mon_files})
 add_library(os STATIC ${libos_srcs} $<TARGET_OBJECTS:os_mon_objs>)
 if(${HAVE_LIBAIO})
@@ -678,6 +682,7 @@ if(${WITH_MDS})
     mds/JournalPointer.cc
     mds/MDSTableClient.cc
     mds/MDSTableServer.cc
+    mds/ScrubStack.cc
     mds/SimpleLock.cc
     mds/SnapRealm.cc
     mds/SnapServer.cc
@@ -842,12 +847,29 @@ endif(${ENABLE_SHARED})
   endif(HAVE_FUSE)
 endif(WITH_LIBCEPHFS)
 
+set(journal_srcs
+  journal/AsyncOpTracker.cc
+  journal/Entry.cc
+  journal/Future.cc
+  journal/FutureImpl.cc
+  journal/Journaler.cc
+  journal/JournalMetadata.cc
+  journal/JournalPlayer.cc
+  journal/JournalRecorder.cc
+  journal/JournalTrimmer.cc
+  journal/ObjectPlayer.cc
+  journal/ObjectRecorder.cc
+  journal/Utils.cc)
+add_library(journal ${journal_srcs})
+
 if(${WITH_RBD})
   set(librbd_srcs
     krbd.cc
     common/ContextCompletion.cc
     librbd/AioCompletion.cc
-    librbd/AioRequest.cc
+    librbd/AioImageRequest.cc
+    librbd/AioImageRequestWQ.cc
+    librbd/AioObjectRequest.cc
     librbd/AsyncFlattenRequest.cc
     librbd/AsyncObjectThrottle.cc
     librbd/AsyncOperation.cc
@@ -855,15 +877,19 @@ if(${WITH_RBD})
     librbd/AsyncResizeRequest.cc
     librbd/AsyncTrimRequest.cc
     librbd/CopyupRequest.cc
+    librbd/DiffIterate.cc
     librbd/ImageCtx.cc
     librbd/ImageWatcher.cc
-    librbd/WatchNotifyTypes.cc
     librbd/internal.cc
+    librbd/Journal.cc
+    librbd/JournalReplay.cc
+    librbd/JournalTypes.cc
     librbd/librbd.cc
+    librbd/LibrbdAdminSocketHook.cc
     librbd/LibrbdWriteback.cc
     librbd/ObjectMap.cc
     librbd/RebuildObjectMapRequest.cc
-    librbd/DiffIterate.cc)
+    librbd/WatchNotifyTypes.cc)
   add_library(librbd ${CEPH_SHARED} ${librbd_srcs}
     $<TARGET_OBJECTS:osdc_rbd_objs>
     $<TARGET_OBJECTS:common_util_obj>)
@@ -875,15 +901,49 @@ if(${WITH_RBD})
   endif(${ENABLE_SHARED})
   install(TARGETS librados librbd DESTINATION lib)
   set(rbd_srcs
-    rbd.cc common/TextTable.cc)
+    tools/rbd/rbd.cc
+    tools/rbd/ArgumentTypes.cc
+    tools/rbd/IndentStream.cc
+    tools/rbd/OptionPrinter.cc
+    tools/rbd/Shell.cc
+    tools/rbd/Utils.cc
+    tools/rbd/action/BenchWrite.cc
+    tools/rbd/action/Children.cc
+    tools/rbd/action/Clone.cc
+    tools/rbd/action/Copy.cc
+    tools/rbd/action/Create.cc
+    tools/rbd/action/Diff.cc
+    tools/rbd/action/DiskUsage.cc
+    tools/rbd/action/Export.cc
+    tools/rbd/action/ExportDiff.cc
+    tools/rbd/action/Feature.cc
+    tools/rbd/action/Flatten.cc
+    tools/rbd/action/ImageMeta.cc
+    tools/rbd/action/Import.cc
+    tools/rbd/action/ImportDiff.cc
+    tools/rbd/action/Info.cc
+    tools/rbd/action/Kernel.cc
+    tools/rbd/action/List.cc
+    tools/rbd/action/Lock.cc
+    tools/rbd/action/MergeDiff.cc
+    tools/rbd/action/ObjectMap.cc
+    tools/rbd/action/Remove.cc
+    tools/rbd/action/Rename.cc
+    tools/rbd/action/Resize.cc
+    tools/rbd/action/Snap.cc
+    tools/rbd/action/Status.cc
+    tools/rbd/action/Watch.cc
+    common/TextTable.cc)
   add_executable(rbd ${rbd_srcs} $<TARGET_OBJECTS:common_util_obj>
     $<TARGET_OBJECTS:parse_secret_objs>
     $<TARGET_OBJECTS:heap_profiler_objs>)
   set_target_properties(rbd PROPERTIES OUTPUT_NAME rbd)
   target_link_libraries(rbd librbd librados global common keyutils udev
+    boost_regex boost_program_options
     ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
   install(TARGETS rbd DESTINATION bin)
   install(PROGRAMS ${CMAKE_SOURCE_DIR}/src/ceph-rbdnamer DESTINATION bin)
+  install(PROGRAMS ${CMAKE_SOURCE_DIR}/src/rbdmap DESTINATION bin)
 
   set(librbd_replay_types_srcs
       rbd_replay/ActionTypes.cc)

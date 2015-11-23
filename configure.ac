@@ -8,7 +8,7 @@ AC_PREREQ(2.59)
 # VERSION define is not used by the code.  It gets a version string
 # from 'git describe'; see src/ceph_ver.[ch]
 
-AC_INIT([ceph], [9.1.0], [ceph-devel@vger.kernel.org])
+AC_INIT([ceph], [10.0.0], [ceph-devel@vger.kernel.org])
 
 AX_CXX_COMPILE_STDCXX_11(, mandatory)
 
@@ -67,10 +67,14 @@ linux*)
 freebsd*)
 	freebsd="yes"
 	;;
+solaris*)
+	solaris="yes"
+	;;
 esac
 AM_CONDITIONAL(LINUX, test x"$linux" = x"yes")
 AM_CONDITIONAL(FREEBSD, test x"$freebsd" = x"yes")
 AM_CONDITIONAL(DARWIN, test x"$darwin" = x"yes")
+AM_CONDITIONAL(SOLARIS, test x"$solaris" = x"yes")
 
 # Checks for programs.
 AC_PROG_CXX
@@ -877,6 +881,8 @@ AC_CHECK_HEADER([boost/random/discrete_distribution.hpp],
 
 AC_CHECK_HEADER([boost/statechart/state.hpp], [],
     AC_MSG_FAILURE(["Can't find boost statechart headers; need 1.34 or later"]))
+AC_CHECK_HEADER([boost/regex.hpp], [],
+    AC_MSG_FAILURE(["Can't find boost regex headers"]))
 AC_CHECK_HEADER([boost/program_options/option.hpp], [],
     AC_MSG_FAILURE(["Can't find boost program_options headers"]))
 
@@ -907,6 +913,17 @@ AC_CHECK_LIB(boost_random-mt, main, [],
 BOOST_RANDOM_LIBS="${LIBS}"
 LIBS="${saved_LIBS}"
 AC_SUBST(BOOST_RANDOM_LIBS)
+
+# boost-regex
+BOOST_REGEX_LIBS=""
+saved_LIBS="${LIBS}"
+LIBS=""
+AC_CHECK_LIB(boost_regex-mt, main, [],
+    [AC_CHECK_LIB(boost_regex, main, [],
+        AC_MSG_FAILURE(["Boost regex library not found."]))])
+BOOST_REGEX_LIBS="${LIBS}"
+LIBS="${saved_LIBS}"
+AC_SUBST(BOOST_REGEX_LIBS)
 
 #
 # Check for boost_program_options library (defines BOOST_PROGRAM_OPTIONS_LIBS).
@@ -943,6 +960,7 @@ AC_CHECK_HEADERS([ \
 	sys/time.h \
 	sys/vfs.h \
 	sys/xattr.h \
+	sys/cdefs.h \
 	syslog.h \
 	utime.h \
 ])

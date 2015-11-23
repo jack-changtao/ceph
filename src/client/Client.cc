@@ -11344,27 +11344,34 @@ int Client::check_pool_perm(Inode *in, int need)
   }
 
   if (!have) {
+    if (in->snapid != CEPH_NOSNAP) {
+      // pool permission check needs to write to the first object. But for snapshot,
+      // head of the first object may have alread been deleted. To avoid creating
+      // orphan object, skip the check for now.
+      return 0;
+    }
+
     pool_perms[pool] = POOL_CHECKING;
 
     char oid_buf[32];
     snprintf(oid_buf, sizeof(oid_buf), "%llx.00000000", (unsigned long long)in->ino);
     object_t oid = oid_buf;
 
+    SnapContext nullsnapc;
+
     C_SaferCond rd_cond;
     ObjectOperation rd_op;
     rd_op.stat(NULL, (utime_t*)NULL, NULL);
 
     objecter->mutate(oid, OSDMap::file_to_object_locator(in->layout), rd_op,
-		     in->snaprealm->get_snap_context(), ceph_clock_now(cct), 0,
-		     &rd_cond, NULL);
+		     nullsnapc, ceph_clock_now(cct), 0, &rd_cond, NULL);
 
     C_SaferCond wr_cond;
     ObjectOperation wr_op;
     wr_op.create(true);
 
     objecter->mutate(oid, OSDMap::file_to_object_locator(in->layout), wr_op,
-		     in->snaprealm->get_snap_context(), ceph_clock_now(cct), 0,
-		     &wr_cond, NULL);
+		     nullsnapc, ceph_clock_now(cct), 0, &wr_cond, NULL);
 
     client_lock.Unlock();
     int rd_ret = rd_cond.wait();
