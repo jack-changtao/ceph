@@ -93,6 +93,7 @@ bool Throttle::_wait(int64_t c)
 {
   utime_t start;
   bool waited = false;
+ /*
   if (_should_wait(c) || !cond.empty()) { // always wait behind other waiters.
     Cond *cv = new Cond;
     cond.push_back(cv);
@@ -121,6 +122,7 @@ bool Throttle::_wait(int64_t c)
     if (!cond.empty())
       cond.front()->SignalOne();
   }
+  */
   return waited;
 }
 

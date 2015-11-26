@@ -7,15 +7,17 @@
 #include "backend.h"
 #include "include/Context.h"
 #include "os/ObjectStore.h"
+#include "os/FileStore.h"
+
 
 class TestFileStoreBackend : public Backend {
-  ObjectStore *os;
+  FileStore *os;
   Finisher finisher;
   map<string, ObjectStore::Sequencer> osrs;
   const bool write_infos;
 
 public:
-  TestFileStoreBackend(ObjectStore *os, bool write_infos);
+  TestFileStoreBackend(FileStore *os, bool write_infos);
   ~TestFileStoreBackend() {
     finisher.stop();
   }

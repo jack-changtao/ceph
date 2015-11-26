@@ -485,6 +485,10 @@ public:
   int queue_transactions(Sequencer *osr, list<Transaction*>& tls,
 			 TrackedOpRef op = TrackedOpRef(),
 			 ThreadPool::TPHandle *handle = NULL);
+  
+  int queue_transactions1(Sequencer *osr, list<Transaction*>& tls,
+			   TrackedOpRef op = TrackedOpRef(),
+			   ThreadPool::TPHandle *handle = NULL);
 
   /**
    * set replay guard xattr on given file
@@ -558,6 +562,7 @@ public:
   int _touch(coll_t cid, const ghobject_t& oid);
   int _write(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len,
 	      const bufferlist& bl, uint32_t fadvise_flags = 0);
+
   int _zero(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len);
   int _truncate(coll_t cid, const ghobject_t& oid, uint64_t size);
   int _clone(coll_t cid, const ghobject_t& oldoid, const ghobject_t& newoid,

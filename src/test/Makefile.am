@@ -37,7 +37,7 @@ test_build_libcommon_SOURCES = \
 test_build_libcommon_LDADD = \
 	$(LIBCOMMON_DEPS) \
 	$(PTHREAD_LIBS) $(CRYPTO_LIBS) $(EXTRALIBS)
-test_build_libcommon_LDFLAGS = -static-libtool-libs
+test_build_libcommon_LDFLAGS = -static-libtool-libs -d
 test_build_libcommon_CFLAGS = $(AM_CFLAGS)
 test_build_libcommon_CXXFLAGS = $(AM_CXXFLAGS)
 bin_DEBUGPROGRAMS += test_build_libcommon

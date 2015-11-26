@@ -227,12 +227,98 @@ int FileStore::lfn_stat(coll_t cid, const ghobject_t& oid, struct stat *buf)
   return r;
 }
 
+static void append_escaped(string::const_iterator begin,
+			   string::const_iterator end, 
+			   string *out)
+{
+  for (string::const_iterator i = begin; i != end; ++i) {
+    if (*i == '\\') {
+      out->append("\\\\");
+    } else if (*i == '/') {
+      out->append("\\s");
+    } else if (*i == '_') {
+      out->append("\\u");
+    } else if (*i == '\0') {
+      out->append("\\n");
+    } else {
+      out->append(i, i+1);
+    }
+  }
+}
+
+static string generate_object_name_poolless(const ghobject_t &oid)
+{
+    assert(oid.generation == ghobject_t::NO_GEN);
+    string full_name;
+    string::const_iterator i = oid.hobj.oid.name.begin();
+    if (oid.hobj.oid.name.substr(0, 4) == "DIR_") {
+      full_name.append("\\d");
+      i += 4;
+    } else if (oid.hobj.oid.name[0] == '.') {
+      full_name.append("\\.");
+      ++i;
+    }
+    append_escaped(i, oid.hobj.oid.name.end(), &full_name);
+    full_name.append("_");
+    append_escaped(oid.hobj.get_key().begin(), oid.hobj.get_key().end(), &full_name);
+    full_name.append("_");
+  
+    char snap_with_hash[PATH_MAX];
+    char *t = snap_with_hash;
+    char *end = t + sizeof(snap_with_hash);
+    if (oid.hobj.snap == CEPH_NOSNAP)
+      t += snprintf(t, end - t, "head");
+    else if (oid.hobj.snap == CEPH_SNAPDIR)
+      t += snprintf(t, end - t, "snapdir");
+    else
+      t += snprintf(t, end - t, "%llx", (long long unsigned)oid.hobj.snap);
+    snprintf(t, end - t, "_%.*X", (int)(sizeof(oid.hobj.get_hash())*2), oid.hobj.get_hash());
+    full_name += string(snap_with_hash);
+    return full_name;
+}
+
+static string get_full_path(string basedir,coll_t cid,
+			       const ghobject_t& oid)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/current/%s/", basedir.c_str(), cid.to_str().c_str());
+    
+    string obj_name = generate_object_name_poolless(oid);
+
+    string full_path(path);
+    full_path += obj_name;
+    
+    return full_path;
+    
+}
+
+
 int FileStore::lfn_open(coll_t cid,
 			const ghobject_t& oid,
 			bool create,
 			FDRef *outfd,
                         Index *index)
 {
+
+#if 1
+  int fd;
+
+  string name = get_full_path(basedir,cid,oid);
+  dout(15)<<"obj name:"<< name << dendl;
+  
+  int flags = O_RDWR;
+  if(create)
+  	flags |= O_CREAT;
+  	
+  fd = ::open(name.c_str(), flags, 0644);
+  if(fd!=-1){
+      (*outfd).reset(new FDCache::FD(fd));
+  	return 0;
+  }
+  return -errno;
+  
+
+#else
   assert(get_allow_sharded_objects() ||
 	 ( oid.shard_id == shard_id_t::NO_SHARD &&
 	   oid.generation == ghobject_t::NO_GEN ));
@@ -266,11 +352,13 @@ int FileStore::lfn_open(coll_t cid,
   if (!replaying) {
     *outfd = fdcache.lookup(oid);
     if (*outfd) {
+      dout(10) << __func__ << "fd cache hit "  << dendl;	
       if (need_lock) {
         ((*index).index)->access_lock.put_write();
       }
       return 0;
     }
+    dout(10) << __func__ << "fd cache miss "  << dendl;
   }
 
 
@@ -334,6 +422,10 @@ int FileStore::lfn_open(coll_t cid,
 
   assert(!m_filestore_fail_eio || r != -EIO);
   return r;
+ #endif
+
+
+ 
 }
 
 void FileStore::lfn_close(FDRef fd)
@@ -1943,6 +2035,77 @@ struct C_JournaledAhead : public Context {
   }
 };
 
+
+int FileStore::queue_transactions1(Sequencer *posr, list<Transaction*> &tls,
+				  TrackedOpRef osd_op,
+				  ThreadPool::TPHandle *handle)
+{
+  Context *onreadable;
+  Context *ondisk;
+  Context *onreadable_sync;
+  ObjectStore::Transaction::collect_contexts(
+    tls, &onreadable, &ondisk, &onreadable_sync);
+  if (g_conf->filestore_blackhole) {
+    dout(0) << "queue_transactions filestore_blackhole = TRUE, dropping transaction" << dendl;
+    delete ondisk;
+    delete onreadable;
+    delete onreadable_sync;
+    return 0;
+  }
+
+  
+  // set up the sequencer
+   OpSequencer *osr;
+   assert(posr);
+   if (posr->p) {
+     osr = static_cast<OpSequencer *>(posr->p.get());
+     dout(5) << "queue_transactions existing " << osr << " " << *osr << dendl;
+   } else {
+     osr = new OpSequencer(next_osr_id.inc());
+     osr->set_cct(g_ceph_context);
+     osr->parent = posr;
+     posr->p = osr;
+     dout(5) << "queue_transactions new " << osr << " " << *osr << dendl;
+   }
+  
+   // used to include osr information in tracepoints during transaction apply
+   for (list<ObjectStore::Transaction*>::iterator i = tls.begin(); i != tls.end(); ++i) {
+     (*i)->set_osr(osr);
+   }
+  
+  //prepare and encode transactions data out of lock
+  bufferlist tbl;
+  
+  static uint64_t op = 0;
+   op++;
+  dout(5) << "queue_transactions (trailing journal) " << op << " " << tls << dendl;
+
+  if (m_filestore_do_dump)
+    dump_transactions(tls, op, osr);
+
+  int r = do_transactions(tls, op);
+
+  // start on_readable finisher after we queue journal item, as on_readable callback
+  // is allowed to delete the Transaction
+  if (onreadable_sync) {
+    onreadable_sync->complete(r);
+  }
+
+  if (ondisk) {
+    ondisk->complete(r);
+  }
+
+  if (onreadable) {
+    onreadable->complete(r);
+  }
+  
+  //apply_finishers[osr->id % m_apply_finisher_num]->queue(onreadable, r);
+
+  //apply_manager.op_apply_finish(op);
+
+  return r;
+}
+
 int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
 				  TrackedOpRef osd_op,
 				  ThreadPool::TPHandle *handle)
@@ -3197,44 +3360,56 @@ int FileStore::_touch(coll_t cid, const ghobject_t& oid)
   return r;
 }
 
+
 int FileStore::_write(coll_t cid, const ghobject_t& oid,
                      uint64_t offset, size_t len,
                      const bufferlist& bl, uint32_t fadvise_flags)
 {
   dout(15) << "write " << cid << "/" << oid << " " << offset << "~" << len << dendl;
   int r;
-
   int64_t actual;
-
-  FDRef fd;
-  r = lfn_open(cid, oid, true, &fd);
+  int fd;
+#if 1
+  FDRef fdr;
+  r = lfn_open(cid, oid, true, &fdr);
   if (r < 0) {
     dout(0) << "write couldn't open " << cid << "/"
 	    << oid << ": "
 	    << cpp_strerror(r) << dendl;
     goto out;
   }
-    
+  fd = **fdr;
+#else
+  
+  char name[100];
+  static int id = 0;
+  sprintf(name, "/data1/ceph_data/osd.x/current/0.0_head/DIR_A/name%d", id++);
+  
+  int flag =  O_RDWR | O_CREAT;
+  //string name = get_full_path(basedir,cid,oid);
+  
+  dout(15)<<"obj name:"<< name << dendl;
+  fd = ::open(name, flag, 0644);
+  assert(fd != -1);
+#endif  
   // seek
-  actual = ::lseek64(**fd, offset, SEEK_SET);
+  actual = ::lseek64(fd, offset, SEEK_SET);
   if (actual < 0) {
     r = -errno;
     dout(0) << "write lseek64 to " << offset << " failed: " << cpp_strerror(r) << dendl;
-    lfn_close(fd);
     goto out;
   }
   if (actual != (int64_t)offset) {
     dout(0) << "write lseek64 to " << offset << " gave bad offset " << actual << dendl;
     r = -EIO;
-    lfn_close(fd);
     goto out;
   }
-
+ 
   // write
-  r = bl.write_fd(**fd);
+  r = bl.write_fd(fd);
   if (r == 0)
     r = bl.length();
-
+/*
   if (r >= 0 && m_filestore_sloppy_crc) {
     int rc = backend->_crc_update_write(**fd, offset, len, bl);
     assert(rc >= 0);
@@ -3245,8 +3420,9 @@ int FileStore::_write(coll_t cid, const ghobject_t& oid,
       g_conf->filestore_wbthrottle_enable)
     wbthrottle.queue_wb(fd, oid, offset, len,
 			  fadvise_flags & CEPH_OSD_OP_FLAG_FADVISE_DONTNEED);
-  lfn_close(fd);
-
+*/
+  //lfn_close(fd);
+ ::close(fd);
  out:
   dout(10) << "write " << cid << "/" << oid << " " << offset << "~" << len << " = " << r << dendl;
   return r;

@@ -112,6 +112,9 @@ void Bencher::init(
   std::ostream *out
   )
 {
+
+  return ;
+ 
   bufferlist bl;
   for (uint64_t i = 0; i < size; ++i) {
     bl.append(0);
@@ -123,11 +126,13 @@ void Bencher::init(
     ceph::shared_ptr<OnFinish> on_finish(
       new OnFinish(&done, &lock, &cond));
     uint64_t num = 0;
+    
     for (set<std::string>::const_iterator i = objects.begin();
 	 i != objects.end();
 	 ++i, ++num) {
       if (!(num % 20))
 	*out << "Creating " << num << "/" << objects.size() << std::endl;
+      
       backend->write(
 	*i,
 	0,
@@ -135,6 +140,7 @@ void Bencher::init(
 	new C_Holder<ceph::shared_ptr<OnFinish> >(on_finish),
 	new C_Holder<ceph::shared_ptr<OnFinish> >(on_finish)
 	);
+      
     }
   }
   {
@@ -152,31 +158,50 @@ void Bencher::run_bench()
   bufferlist bl;
 
   while ((!max_duration || time(0) < end) && (!max_ops || ops < max_ops)) {
+  #ifndef TEST
     start_op();
-    uint64_t seq = stat_collector->next_seq();
+    uint64_t seq =  stat_collector->next_seq();
+  #else
+    static uint64_t seq = 0;// stat_collector->next_seq();
+    seq++;
+  #endif  
     boost::tuple<std::string, uint64_t, uint64_t, OpType> next =
       (*op_dist)();
+    
     string obj_name = next.get<0>();
     uint64_t offset = next.get<1>();
     uint64_t length = next.get<2>();
     OpType op_type = next.get<3>();
+    
     switch (op_type) {
       case WRITE: {
+
+    #ifndef TEST	
 	ceph::shared_ptr<OnDelete> on_delete(
-	  new OnDelete(new Cleanup(this)));
+	  new OnDelete(new Cleanup(this))); 
+	
 	stat_collector->start_write(seq, length);
+    #endif
+    
 	while (bl.length() < length) {
 	  bl.append(rand());
 	}
 	backend->write(
 	  obj_name,
 	  offset,
-	  bl,
+	  bl,	
+    #ifdef TEST
+	  NULL, 
+	  NULL
+	 );
+    #else
 	  new OnWriteApplied(
-	    this, seq, on_delete),
-	  new OnWriteCommit(
+	   this, seq, on_delete), 
+	   new OnWriteCommit(
 	    this, seq, on_delete)
 	  );
+    #endif
+	 
 	break;
       }
       case READ: {
