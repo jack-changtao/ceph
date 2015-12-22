@@ -85,6 +85,12 @@ CHECK_SYMBOL_EXISTS(__s64 "sys/types.h;linux/types.h" HAVE___S64)
 
 CHECK_SYMBOL_EXISTS(res_nquery "resolv.h" HAVE_RES_NQUERY)
 
+include(CheckCXXSourceCompiles)
+CHECK_CXX_SOURCE_COMPILES("
+  #include <string.h>
+  int main() { char x = *strerror_r(0, &x, sizeof(x)); return 0; }
+  " STRERROR_R_CHAR_P)
+
 set(CEPH_MAN_DIR "share/man" CACHE STRING "Install location for man pages (relative to prefix).")
 
 option(ENABLE_SHARED "build shared libraries" ON)
@@ -216,6 +222,11 @@ option(WITH_THREAD_SAFE_RES_QUERY "res_query is thread safe" OFF)
 if(WITH_THREAD_SAFE_RES_QUERY)
     set(HAVE_THREAD_SAFE_RES_QUERY 1 CACHE INTERNAL "Thread safe res_query supported.")
 endif(WITH_THREAD_SAFE_RES_QUERY)
+
+option(WITH_REENTRANT_STRSIGNAL "strsignal is reentrant" OFF)
+if(WITH_REENTRANT_STRSIGNAL)
+    set(HAVE_REENTRANT_STRSIGNAL 1 CACHE INTERNAL "Reentrant strsignal is supported.")
+endif(WITH_REENTRANT_STRSIGNAL)
 
 # Now create a useable config.h
 configure_file(

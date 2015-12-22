@@ -17,6 +17,7 @@
 #include "include/rbd_types.h"
 #include "include/rbd/librbd.h"
 #include "include/rbd/librbd.hpp"
+#include "include/event_type.h"
 
 #include "common/Thread.h"
 
@@ -27,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <poll.h>
 #include <time.h>
 #include <unistd.h>
 #include <iostream>
@@ -43,6 +45,10 @@
 
 #include <boost/assign/list_of.hpp>
 #include <boost/scope_exit.hpp>
+
+#ifdef HAVE_EVENTFD
+#include <sys/eventfd.h>
+#endif
 
 using namespace std;
 
@@ -662,21 +668,28 @@ TEST_F(TestLibRBD, TestCreateLsDeleteSnapPP)
     
     ASSERT_EQ(0, create_image_pp(rbd, ioctx, name.c_str(), size, &order));
     ASSERT_EQ(0, rbd.open(ioctx, image, name.c_str(), NULL));
-
-    ASSERT_FALSE(image.snap_exists("snap1"));
+   
+    bool exists;
+    ASSERT_EQ(0, image.snap_exists2("snap1", &exists));
+    ASSERT_FALSE(exists);
     ASSERT_EQ(0, image.snap_create("snap1"));
-    ASSERT_TRUE(image.snap_exists("snap1"));
+    ASSERT_EQ(0, image.snap_exists2("snap1", &exists));
+    ASSERT_TRUE(exists);
     ASSERT_EQ(1, test_ls_snaps(image, 1, "snap1", size));
     ASSERT_EQ(0, image.resize(size2));
-    ASSERT_FALSE(image.snap_exists("snap2"));
+    ASSERT_EQ(0, image.snap_exists2("snap2", &exists));
+    ASSERT_FALSE(exists);
     ASSERT_EQ(0, image.snap_create("snap2"));
-    ASSERT_TRUE(image.snap_exists("snap2"));
+    ASSERT_EQ(0, image.snap_exists2("snap2", &exists));
+    ASSERT_TRUE(exists);
     ASSERT_EQ(2, test_ls_snaps(image, 2, "snap1", size, "snap2", size2));
     ASSERT_EQ(0, image.snap_remove("snap1"));
-    ASSERT_FALSE(image.snap_exists("snap1"));
+    ASSERT_EQ(0, image.snap_exists2("snap1", &exists));
+    ASSERT_FALSE(exists);
     ASSERT_EQ(1, test_ls_snaps(image, 1, "snap2", size2));
     ASSERT_EQ(0, image.snap_remove("snap2"));
-    ASSERT_FALSE(image.snap_exists("snap2"));
+    ASSERT_EQ(0, image.snap_exists2("snap2", &exists));
+    ASSERT_FALSE(exists);
     ASSERT_EQ(0, test_ls_snaps(image, 0));
   }
 
@@ -698,25 +711,34 @@ TEST_F(TestLibRBD, TestCreateLsRenameSnapPP)
     
     ASSERT_EQ(0, create_image_pp(rbd, ioctx, name.c_str(), size, &order));
     ASSERT_EQ(0, rbd.open(ioctx, image, name.c_str(), NULL));
-
-    ASSERT_FALSE(image.snap_exists("snap1"));
+    
+    bool exists;
+    ASSERT_EQ(0, image.snap_exists2("snap1", &exists));
+    ASSERT_FALSE(exists);
     ASSERT_EQ(0, image.snap_create("snap1"));
-    ASSERT_TRUE(image.snap_exists("snap1"));
+    ASSERT_EQ(0, image.snap_exists2("snap1", &exists));
+    ASSERT_TRUE(exists);
     ASSERT_EQ(1, test_ls_snaps(image, 1, "snap1", size));
     ASSERT_EQ(0, image.resize(size2));
-    ASSERT_FALSE(image.snap_exists("snap2"));
+    ASSERT_EQ(0, image.snap_exists2("snap2", &exists));
+    ASSERT_FALSE(exists);
     ASSERT_EQ(0, image.snap_create("snap2"));
-    ASSERT_TRUE(image.snap_exists("snap2"));
+    ASSERT_EQ(0, image.snap_exists2("snap2", &exists));
+    ASSERT_TRUE(exists);
     ASSERT_EQ(2, test_ls_snaps(image, 2, "snap1", size, "snap2", size2));
     ASSERT_EQ(0, image.snap_rename("snap1","snap1-rename"));
     ASSERT_EQ(2, test_ls_snaps(image, 2, "snap1-rename", size, "snap2", size2));
-    ASSERT_FALSE(image.snap_exists("snap1"));
-    ASSERT_TRUE(image.snap_exists("snap1-rename"));
+    ASSERT_EQ(0, image.snap_exists2("snap1", &exists));
+    ASSERT_FALSE(exists);
+    ASSERT_EQ(0, image.snap_exists2("snap1-rename", &exists));
+    ASSERT_TRUE(exists);
     ASSERT_EQ(0, image.snap_remove("snap1-rename"));
     ASSERT_EQ(0, image.snap_rename("snap2","snap2-rename"));
     ASSERT_EQ(1, test_ls_snaps(image, 1, "snap2-rename", size2));
-    ASSERT_FALSE(image.snap_exists("snap2"));
-    ASSERT_TRUE(image.snap_exists("snap2-rename"));
+    ASSERT_EQ(0, image.snap_exists2("snap2", &exists));
+    ASSERT_FALSE(exists);
+    ASSERT_EQ(0, image.snap_exists2("snap2-rename", &exists));
+    ASSERT_TRUE(exists);
     ASSERT_EQ(0, image.snap_remove("snap2-rename"));
     ASSERT_EQ(0, test_ls_snaps(image, 0));
   }
@@ -737,6 +759,41 @@ void simple_write_cb(rbd_completion_t cb, void *arg)
 void simple_read_cb(rbd_completion_t cb, void *arg)
 {
   printf("read completion cb called!\n");
+}
+
+void aio_write_test_data_and_poll(rbd_image_t image, int fd, const char *test_data,
+                                  uint64_t off, size_t len, uint32_t iohint, bool *passed)
+{
+  rbd_completion_t comp;
+  uint64_t data = 0x123;
+  rbd_aio_create_completion((void*)&data, (rbd_callback_t) simple_write_cb, &comp);
+  printf("created completion\n");
+  printf("started write\n");
+  if (iohint)
+    rbd_aio_write2(image, off, len, test_data, comp, iohint);
+  else
+    rbd_aio_write(image, off, len, test_data, comp);
+
+  struct pollfd pfd;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+
+  ASSERT_EQ(1, poll(&pfd, 1, -1));
+  ASSERT_TRUE(pfd.revents & POLLIN);
+
+  rbd_completion_t comps[1];
+  ASSERT_EQ(1, rbd_poll_io_events(image, comps, 1));
+  uint64_t count;
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(count)),
+            read(fd, &count, sizeof(count)));
+  int r = rbd_aio_get_return_value(comps[0]);
+  ASSERT_TRUE(rbd_aio_is_complete(comps[0]));
+  ASSERT_TRUE(*(uint64_t*)rbd_aio_get_arg(comps[0]) == data);
+  printf("return value is: %d\n", r);
+  ASSERT_EQ(0, r);
+  printf("finished write\n");
+  rbd_aio_release(comps[0]);
+  *passed = true;
 }
 
 void aio_write_test_data(rbd_image_t image, const char *test_data, uint64_t off, size_t len, uint32_t iohint, bool *passed)
@@ -789,6 +846,47 @@ void discard_test_data(rbd_image_t image, uint64_t off, size_t len, bool *passed
   written = rbd_discard(image, off, len);
   printf("discard: %d~%d = %d\n", (int)off, (int)len, (int)written);
   ASSERT_EQ(len, static_cast<size_t>(written));
+  *passed = true;
+}
+
+void aio_read_test_data_and_poll(rbd_image_t image, int fd, const char *expected,
+                                 uint64_t off, size_t len, uint32_t iohint, bool *passed)
+{
+  rbd_completion_t comp;
+  char *result = (char *)malloc(len + 1);
+
+  ASSERT_NE(static_cast<char *>(NULL), result);
+  rbd_aio_create_completion(NULL, (rbd_callback_t) simple_read_cb, &comp);
+  printf("created completion\n");
+  printf("started read\n");
+  if (iohint)
+    rbd_aio_read2(image, off, len, result, comp, iohint);
+  else
+    rbd_aio_read(image, off, len, result, comp);
+
+  struct pollfd pfd;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+
+  ASSERT_EQ(1, poll(&pfd, 1, -1));
+  ASSERT_TRUE(pfd.revents & POLLIN);
+
+  rbd_completion_t comps[1];
+  ASSERT_EQ(1, rbd_poll_io_events(image, comps, 1));
+  uint64_t count;
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(count)),
+            read(fd, &count, sizeof(count)));
+
+  int r = rbd_aio_get_return_value(comps[0]);
+  ASSERT_TRUE(rbd_aio_is_complete(comps[0]));
+  printf("return value is: %d\n", r);
+  ASSERT_EQ(len, static_cast<size_t>(r));
+  rbd_aio_release(comps[0]);
+  if (memcmp(result, expected, len)) {
+    printf("read: %s\nexpected: %s\n", result, expected);
+    ASSERT_EQ(0, memcmp(result, expected, len));
+  }
+  free(result);
   *passed = true;
 }
 
@@ -2744,15 +2842,15 @@ TEST_F(TestLibRBD, RebuildObjectMapViaLockOwner)
   librbd::Image image1;
   ASSERT_EQ(0, rbd.open(ioctx, image1, name.c_str(), NULL));
 
-  uint64_t flags;
-  ASSERT_EQ(0, image1.get_flags(&flags));
-  ASSERT_TRUE((flags & RBD_FLAG_OBJECT_MAP_INVALID) != 0);
-
   bool lock_owner;
   bl.clear();
   ASSERT_EQ(0, image1.write(0, 0, bl));
   ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
   ASSERT_TRUE(lock_owner);
+
+  uint64_t flags;
+  ASSERT_EQ(0, image1.get_flags(&flags));
+  ASSERT_TRUE((flags & RBD_FLAG_OBJECT_MAP_INVALID) != 0);
 
   librbd::Image image2;
   ASSERT_EQ(0, rbd.open(ioctx, image2, name.c_str(), NULL));
@@ -2827,8 +2925,11 @@ TEST_F(TestLibRBD, SnapCreateViaLockOwner)
   ASSERT_FALSE(lock_owner);
 
   ASSERT_EQ(0, image2.snap_create("snap1"));
-  ASSERT_TRUE(image1.snap_exists("snap1"));
-  ASSERT_TRUE(image2.snap_exists("snap1"));
+  bool exists;
+  ASSERT_EQ(0, image1.snap_exists2("snap1", &exists));
+  ASSERT_TRUE(exists);
+  ASSERT_EQ(0, image2.snap_exists2("snap1", &exists));
+  ASSERT_TRUE(exists);
 
   ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
   ASSERT_TRUE(lock_owner);
@@ -2865,8 +2966,11 @@ TEST_F(TestLibRBD, SnapRemoveViaLockOwner)
   ASSERT_FALSE(lock_owner);
 
   ASSERT_EQ(0, image2.snap_remove("snap1"));
-  ASSERT_FALSE(image1.snap_exists("snap1"));
-  ASSERT_FALSE(image2.snap_exists("snap1"));
+  bool exists;
+  ASSERT_EQ(0, image1.snap_exists2("snap1", &exists));
+  ASSERT_FALSE(exists);
+  ASSERT_EQ(0, image2.snap_exists2("snap1", &exists));
+  ASSERT_FALSE(exists);
 
   ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
   ASSERT_TRUE(lock_owner);
@@ -2903,8 +3007,11 @@ TEST_F(TestLibRBD, SnapRenameViaLockOwner)
   ASSERT_FALSE(lock_owner);
 
   ASSERT_EQ(0, image2.snap_rename("snap1", "snap1-rename"));
-  ASSERT_TRUE(image1.snap_exists("snap1-rename"));
-  ASSERT_TRUE(image2.snap_exists("snap1-rename"));
+  bool exists;
+  ASSERT_EQ(0, image1.snap_exists2("snap1-rename", &exists));
+  ASSERT_TRUE(exists);
+  ASSERT_EQ(0, image2.snap_exists2("snap1-rename", &exists));
+  ASSERT_TRUE(exists);
 
   ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
   ASSERT_TRUE(lock_owner);
@@ -3324,6 +3431,12 @@ TEST_F(TestLibRBD, RebuildObjectMap)
   librbd::Image image1;
   ASSERT_EQ(0, rbd.open(ioctx, image1, name.c_str(), NULL));
 
+  bool lock_owner;
+  bl.clear();
+  ASSERT_EQ(0, image1.write(0, 0, bl));
+  ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
+  ASSERT_TRUE(lock_owner);
+
   uint64_t flags;
   ASSERT_EQ(0, image1.get_flags(&flags));
   ASSERT_TRUE((flags & RBD_FLAG_OBJECT_MAP_INVALID) != 0);
@@ -3347,7 +3460,7 @@ TEST_F(TestLibRBD, RebuildObjectMap)
 
 TEST_F(TestLibRBD, RebuildNewObjectMap)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
+  REQUIRE_FEATURE(RBD_FEATURE_OBJECT_MAP);
 
   rados_ioctx_t ioctx;
   rados_ioctx_create(_cluster, m_pool_name.c_str(), &ioctx);
@@ -3691,4 +3804,106 @@ TEST_F(TestLibRBD, TestImageOptionsPP)
   ASSERT_EQ(0, parent.copy_with_progress3(ioctx, copy2_name.c_str(), opts, pp));
 
   ASSERT_EQ(0, parent.close());
+}
+
+TEST_F(TestLibRBD, ImagePollIO)
+{
+#ifdef HAVE_EVENTFD
+  rados_ioctx_t ioctx;
+  rados_ioctx_create(_cluster, m_pool_name.c_str(), &ioctx);
+
+  rbd_image_t image;
+  int order = 0;
+  std::string name = get_temp_image_name();
+  uint64_t size = 2 << 20;
+  int fd = eventfd(0, EFD_NONBLOCK);
+
+  ASSERT_EQ(0, create_image(ioctx, name.c_str(), size, &order));
+  ASSERT_EQ(0, rbd_open(ioctx, name.c_str(), &image, NULL));
+
+  ASSERT_EQ(0, rbd_set_image_notification(image, fd, EVENT_SOCKET_TYPE_EVENTFD));
+
+  char test_data[TEST_IO_SIZE + 1];
+  char zero_data[TEST_IO_SIZE + 1];
+  int i;
+
+  for (i = 0; i < TEST_IO_SIZE; ++i)
+    test_data[i] = (char) (rand() % (126 - 33) + 33);
+  test_data[TEST_IO_SIZE] = '\0';
+  memset(zero_data, 0, sizeof(zero_data));
+
+  for (i = 0; i < 5; ++i)
+    ASSERT_PASSED(write_test_data, image, test_data, TEST_IO_SIZE * i, TEST_IO_SIZE, 0);
+
+  for (i = 5; i < 10; ++i)
+    ASSERT_PASSED(aio_write_test_data_and_poll, image, fd, test_data, TEST_IO_SIZE * i, TEST_IO_SIZE, 0);
+
+  for (i = 5; i < 10; ++i)
+    ASSERT_PASSED(aio_read_test_data_and_poll, image, fd, test_data, TEST_IO_SIZE * i, TEST_IO_SIZE, 0);
+
+  ASSERT_EQ(0, rbd_close(image));
+  rados_ioctx_destroy(ioctx);
+#endif
+}
+
+namespace librbd {
+
+static bool operator==(const mirror_peer_t &lhs, const mirror_peer_t &rhs) {
+  return (lhs.cluster_uuid == rhs.cluster_uuid &&
+          lhs.cluster_name == rhs.cluster_name &&
+          lhs.client_name == rhs.client_name);
+}
+
+} // namespace librbd
+
+TEST_F(TestLibRBD, Mirror) {
+  librados::IoCtx ioctx;
+  ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
+
+  librbd::RBD rbd;
+
+  std::vector<librbd::mirror_peer_t> expected_peers;
+  std::vector<librbd::mirror_peer_t> peers;
+  ASSERT_EQ(0, rbd.mirror_peer_list(ioctx, &peers));
+  ASSERT_EQ(expected_peers, peers);
+
+  ASSERT_EQ(-EINVAL, rbd.mirror_peer_add(ioctx, "uuid1", "cluster1", "client"));
+
+  bool enabled;
+  ASSERT_EQ(0, rbd.mirror_is_enabled(ioctx, &enabled));
+  ASSERT_FALSE(enabled);
+  ASSERT_EQ(0, rbd.mirror_set_enabled(ioctx, true));
+  ASSERT_EQ(0, rbd.mirror_is_enabled(ioctx, &enabled));
+  ASSERT_TRUE(enabled);
+
+  ASSERT_EQ(0, rbd.mirror_peer_add(ioctx, "uuid1", "cluster1", "client"));
+  ASSERT_EQ(0, rbd.mirror_peer_add(ioctx, "uuid2", "cluster2", "admin"));
+  ASSERT_EQ(-EEXIST, rbd.mirror_peer_add(ioctx, "uuid2", "cluster3", "foo"));
+  ASSERT_EQ(-EEXIST, rbd.mirror_peer_add(ioctx, "uuid3", "cluster1", "foo"));
+  ASSERT_EQ(0, rbd.mirror_peer_add(ioctx, "uuid3", "cluster3", "admin"));
+
+  ASSERT_EQ(0, rbd.mirror_peer_list(ioctx, &peers));
+  expected_peers = {
+    {"uuid1", "cluster1", "client"},
+    {"uuid2", "cluster2", "admin"},
+    {"uuid3", "cluster3", "admin"}};
+  ASSERT_EQ(expected_peers, peers);
+
+  ASSERT_EQ(0, rbd.mirror_peer_remove(ioctx, "uuid4"));
+  ASSERT_EQ(0, rbd.mirror_peer_remove(ioctx, "uuid2"));
+
+  ASSERT_EQ(-ENOENT, rbd.mirror_peer_set_client(ioctx, "uuid4", "new client"));
+  ASSERT_EQ(0, rbd.mirror_peer_set_client(ioctx, "uuid1", "new client"));
+
+  ASSERT_EQ(-ENOENT, rbd.mirror_peer_set_cluster(ioctx, "uuid4",
+                                                 "new cluster"));
+  ASSERT_EQ(0, rbd.mirror_peer_set_cluster(ioctx, "uuid3", "new cluster"));
+
+  ASSERT_EQ(0, rbd.mirror_peer_list(ioctx, &peers));
+  expected_peers = {
+    {"uuid1", "cluster1", "new client"},
+    {"uuid3", "new cluster", "admin"}};
+  ASSERT_EQ(expected_peers, peers);
+
+  ASSERT_EQ(-EBUSY, rbd.mirror_set_enabled(ioctx, false));
 }

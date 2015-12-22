@@ -17,7 +17,8 @@ class ImageCtx;
 
 namespace operation {
 
-class SnapshotCreateRequest : public Request {
+template <typename ImageCtxT = ImageCtx>
+class SnapshotCreateRequest : public Request<ImageCtxT> {
 public:
   /**
    * Snap Create goes through the following state machine:
@@ -30,10 +31,7 @@ public:
    *           STATE_SUSPEND_REQUESTS
    *               |
    *               v
-   *           STATE_SUSPEND_AIO
-   *               |
-   *               v
-   *           STATE_FLUSH_AIO * * * * * * * * * * * * * *
+   *           STATE_SUSPEND_AIO * * * * * * * * * * * * *
    *               |                                     *
    *   (retry)     v                                     *
    *   . . . > STATE_ALLOCATE_SNAP_ID  * *               *
@@ -61,14 +59,13 @@ public:
   enum State {
     STATE_SUSPEND_REQUESTS,
     STATE_SUSPEND_AIO,
-    STATE_FLUSH_AIO,
     STATE_ALLOCATE_SNAP_ID,
     STATE_CREATE_SNAP,
     STATE_CREATE_OBJECT_MAP,
     STATE_RELEASE_SNAP_ID
   };
 
-  SnapshotCreateRequest(ImageCtx &image_ctx, Context *on_finish,
+  SnapshotCreateRequest(ImageCtxT &image_ctx, Context *on_finish,
 		        const std::string &snap_name);
 
 protected:
@@ -112,7 +109,6 @@ private:
 
   void send_suspend_requests();
   void send_suspend_aio();
-  void send_flush_aio();
   void send_allocate_snap_id();
   void send_create_snap();
   bool send_create_object_map();
@@ -125,5 +121,7 @@ private:
 
 } // namespace operation
 } // namespace librbd
+
+extern template class librbd::operation::SnapshotCreateRequest<librbd::ImageCtx>;
 
 #endif // CEPH_LIBRBD_OPERATION_SNAPSHOT_CREATE_REQUEST_H

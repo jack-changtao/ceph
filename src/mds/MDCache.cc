@@ -5375,7 +5375,11 @@ void MDCache::choose_lock_states_and_reconnect_caps()
     if (in->is_auth() && !in->is_base() && in->inode.is_dirty_rstat())
       in->mark_dirty_rstat();
 
-    in->choose_lock_states();
+    int dirty_caps = 0;
+    map<inodeno_t, int>::iterator it = cap_imports_dirty.find(in->ino());
+    if (it != cap_imports_dirty.end())
+      dirty_caps = it->second;
+    in->choose_lock_states(dirty_caps);
     dout(15) << " chose lock states on " << *in << dendl;
 
     SnapRealm *realm = in->find_snaprealm();
@@ -5521,6 +5525,7 @@ void MDCache::export_remaining_imported_caps()
   }
 
   cap_imports.clear();
+  cap_imports_dirty.clear();
 
   if (warn_str.peek() != EOF) {
     mds->clog->warn() << "failed to reconnect caps for missing inodes:" << "\n";
@@ -5543,7 +5548,11 @@ void MDCache::try_reconnect_cap(CInode *in, Session *session)
     if (in->is_replicated()) {
       mds->locker->try_eval(in, CEPH_CAP_LOCKS);
     } else {
-      in->choose_lock_states();
+      int dirty_caps = 0;
+      map<inodeno_t, int>::iterator it = cap_imports_dirty.find(in->ino());
+      if (it != cap_imports_dirty.end())
+	dirty_caps = it->second;
+      in->choose_lock_states(dirty_caps);
       dout(15) << " chose lock states on " << *in << dendl;
     }
   }
@@ -6105,7 +6114,7 @@ void MDCache::_truncate_inode(CInode *in, LogSegment *ls)
   dout(10) << "_truncate_inode  snapc " << snapc << " on " << *in << dendl;
   filer.truncate(in->inode.ino, &in->inode.layout, *snapc,
 		 pi->truncate_size, pi->truncate_from-pi->truncate_size,
-		 pi->truncate_seq, utime_t(), 0,
+		 pi->truncate_seq, ceph::real_time::min(), 0,
 		 0, new C_OnFinisher(new C_IO_MDC_TruncateFinish(this, in,
 								       ls),
 					   mds->finisher));
@@ -11092,7 +11101,8 @@ void MDCache::_fragment_committed(dirfrag_t basedirfrag, list<CDir*>& resultfrag
       dout(10) << " removing orphan dirfrag " << oid << dendl;
       op.remove();
     }
-    mds->objecter->mutate(oid, oloc, op, nullsnapc, ceph_clock_now(g_ceph_context),
+    mds->objecter->mutate(oid, oloc, op, nullsnapc,
+			  ceph::real_clock::now(g_ceph_context),
 			  0, NULL, gather.new_sub());
   }
 

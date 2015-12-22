@@ -6,6 +6,7 @@ Makefile
 /.git_version
 /.libs
 /acconfig.h*
+/build
 /ceph
 /cephfs
 /crushtool
@@ -74,6 +75,7 @@ Makefile
 /radosgw-admin
 /radosgw-object-expirer
 /rbd
+/rbd-nbd
 /rbd-fuse
 /rbd-replay
 /rbd-replay-prep

@@ -247,7 +247,7 @@ function test_tiering_agent()
   done
   $evicted # assert
   # the object is proxy read and promoted to the cache
-  rados -p $slow get obj1 /tmp/obj1
+  rados -p $slow get obj1 - >/dev/null
   # wait for the promoted object to be evicted again
   evicted=false
   for i in 1 2 4 8 16 32 64 128 256 ; do
@@ -576,22 +576,22 @@ function test_auth_profiles()
 
 function test_mon_caps()
 {
-  ./ceph-authtool --create-keyring $TMPDIR/ceph.client.bug.keyring
+  ceph-authtool --create-keyring $TMPDIR/ceph.client.bug.keyring
   chmod +r  $TMPDIR/ceph.client.bug.keyring
-  ./ceph-authtool  $TMPDIR/ceph.client.bug.keyring -n client.bug --gen-key
-  ./ceph auth add client.bug -i  $TMPDIR/ceph.client.bug.keyring
+  ceph-authtool  $TMPDIR/ceph.client.bug.keyring -n client.bug --gen-key
+  ceph auth add client.bug -i  $TMPDIR/ceph.client.bug.keyring
 
-  ./rados lspools --keyring $TMPDIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
+  rados lspools --keyring $TMPDIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
   check_response "Permission denied"
 
   rm -rf $TMPDIR/ceph.client.bug.keyring
-  ./ceph auth del client.bug
-  ./ceph-authtool --create-keyring $TMPDIR/ceph.client.bug.keyring
+  ceph auth del client.bug
+  ceph-authtool --create-keyring $TMPDIR/ceph.client.bug.keyring
   chmod +r  $TMPDIR/ceph.client.bug.keyring
-  ./ceph-authtool  $TMPDIR/ceph.client.bug.keyring -n client.bug --gen-key
-  ./ceph-authtool -n client.bug --cap mon '' $TMPDIR/ceph.client.bug.keyring
-  ./ceph auth add client.bug -i  $TMPDIR/ceph.client.bug.keyring
-  ./rados lspools --keyring $TMPDIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
+  ceph-authtool  $TMPDIR/ceph.client.bug.keyring -n client.bug --gen-key
+  ceph-authtool -n client.bug --cap mon '' $TMPDIR/ceph.client.bug.keyring
+  ceph auth add client.bug -i  $TMPDIR/ceph.client.bug.keyring
+  rados lspools --keyring $TMPDIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
   check_response "Permission denied"  
 }
 
@@ -1008,6 +1008,12 @@ function test_mon_osd()
   expect_false "ceph osd blacklist $bl/-1"
   expect_false "ceph osd blacklist $bl/foo"
 
+  # Test `clear`
+  ceph osd blacklist add $bl
+  ceph osd blacklist ls | grep $bl
+  ceph osd blacklist clear
+  expect_false "ceph osd blacklist ls | grep $bl"
+
   #
   # osd crush
   #
@@ -1388,6 +1394,36 @@ function test_mon_osd_pool_set()
       expect_false ceph osd pool set $TEST_POOL_GETSET $flag asdf
       expect_false ceph osd pool set $TEST_POOL_GETSET $flag 2
   done
+
+  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | grep '.'"
+  ceph osd pool set $TEST_POOL_GETSET scrub_min_interval 123456
+  ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | grep 'scrub_min_interval: 123456'
+  ceph osd pool set $TEST_POOL_GETSET scrub_min_interval 0
+  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | grep '.'"
+
+  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | grep '.'"
+  ceph osd pool set $TEST_POOL_GETSET scrub_max_interval 123456
+  ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | grep 'scrub_max_interval: 123456'
+  ceph osd pool set $TEST_POOL_GETSET scrub_max_interval 0
+  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | grep '.'"
+
+  expect_false "ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | grep '.'"
+  ceph osd pool set $TEST_POOL_GETSET deep_scrub_interval 123456
+  ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | grep 'deep_scrub_interval: 123456'
+  ceph osd pool set $TEST_POOL_GETSET deep_scrub_interval 0
+  expect_false "ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | grep '.'"
+
+  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_priority | grep '.'"
+  ceph osd pool set $TEST_POOL_GETSET recovery_priority 5 
+  ceph osd pool get $TEST_POOL_GETSET recovery_priority | grep 'recovery_priority: 5'
+  ceph osd pool set $TEST_POOL_GETSET recovery_priority 0
+  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_priority | grep '.'"
+
+  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | grep '.'"
+  ceph osd pool set $TEST_POOL_GETSET recovery_op_priority 5 
+  ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | grep 'recovery_op_priority: 5'
+  ceph osd pool set $TEST_POOL_GETSET recovery_op_priority 0
+  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | grep '.'"
 
   ceph osd pool set $TEST_POOL_GETSET nopgchange 1
   expect_false ceph osd pool set $TEST_POOL_GETSET pg_num 10

@@ -176,6 +176,9 @@
 /* Define to 1 if you have the <utime.h> header file. */
 #cmakedefine HAVE_UTIME_H
 
+/* Define to 1 if strerror_r returns char *. */
+#cmakedefine STRERROR_R_CHAR_P 1
+
 /* Define to the sub-directory in which libtool stores uninstalled libraries.
    */
 #cmakedefine LT_OBJDIR
@@ -242,5 +245,8 @@
 
 /* res_query is thread safe */
 #cmakedefine HAVE_THREAD_SAFE_RES_QUERY
+
+/* Define if HAVE_REENTRANT_STRSIGNAL */
+#cmakedefine HAVE_REENTRANT_STRSIGNAL
 
 #endif /* CONFIG_H */

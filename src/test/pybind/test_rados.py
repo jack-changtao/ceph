@@ -33,6 +33,11 @@ def test_ioctx_context_manager():
         with conn.open_ioctx('rbd') as ioctx:
             pass
 
+def test_parse_argv_empty_str():
+    args = ['']
+    r = Rados()
+    eq(args, r.conf_parse_argv(args))
+
 class TestRequires(object):
     @requires(('foo', str), ('bar', int), ('baz', int))
     def _method_plain(self, foo, bar, baz):
@@ -354,6 +359,15 @@ class TestIoctx(object):
         self.ioctx.remove_snap('foo')
         eq(list(self.ioctx.list_snaps()), [])
 
+    def test_snap_rollback(self):
+        self.ioctx.write("insnap", b"contents1")
+        self.ioctx.create_snap("snap1")
+        self.ioctx.remove_object("insnap")
+        self.ioctx.snap_rollback("insnap", "snap1")
+        eq(self.ioctx.read("insnap"), b"contents1")
+        self.ioctx.remove_snap("snap1")
+        self.ioctx.remove_object("insnap")
+
     def test_set_omap(self):
         keys = ("1", "2", "3", "4")
         values = (b"aaa", b"bbb", b"ccc", b"\x04\x04\x04\x04")
@@ -578,6 +592,14 @@ class TestIoctx(object):
         assert_raises(ObjectNotFound, self.ioctx.unlock, "foo", "lock", "locker1")
         assert_raises(ObjectNotFound, self.ioctx.unlock, "foo", "lock", "locker2")
 
+    def test_execute(self):
+        self.ioctx.write("foo", "") # ensure object exists
+
+        ret, buf = self.ioctx.execute("foo", "hello", "say_hello", "")
+        eq(buf, "Hello, world!")
+
+        ret, buf = self.ioctx.execute("foo", "hello", "say_hello", "nose")
+        eq(buf, "Hello, nose!")
 
 class TestObject(object):
 

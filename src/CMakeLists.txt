@@ -217,6 +217,7 @@ set(libcommon_files
   common/escape.c
   common/io_priority.cc
   common/Clock.cc
+  common/ceph_time.cc
   common/Throttle.cc
   common/Timer.cc
   common/Finisher.cc
@@ -281,6 +282,7 @@ set(libcommon_files
   common/Thread.cc
   common/Formatter.cc
   common/HeartbeatMap.cc
+  common/PluginRegistry.cc
   common/ceph_fs.cc
   common/ceph_hash.cc
   common/ceph_strings.cc
@@ -301,6 +303,7 @@ set(libcommon_files
   common/pick_address.cc
   common/address_helper.cc
   common/linux_version.c
+  common/TracepointProvider.cc
   osdc/Striper.cc
   osdc/Objecter.cc
   ${arch_files}
@@ -402,6 +405,7 @@ install(FILES include/rados/librados.h
   include/rados/rados_types.hpp
   include/rados/librados.hpp
   include/buffer.h
+  include/buffer_fwd.h
   include/page.h
   include/crc32c.h
   DESTINATION include/rados)
@@ -870,15 +874,14 @@ if(${WITH_RBD})
     librbd/AioImageRequest.cc
     librbd/AioImageRequestWQ.cc
     librbd/AioObjectRequest.cc
-    librbd/AsyncFlattenRequest.cc
     librbd/AsyncObjectThrottle.cc
     librbd/AsyncOperation.cc
     librbd/AsyncRequest.cc
-    librbd/AsyncResizeRequest.cc
-    librbd/AsyncTrimRequest.cc
     librbd/CopyupRequest.cc
     librbd/DiffIterate.cc
+    librbd/ExclusiveLock.cc
     librbd/ImageCtx.cc
+    librbd/ImageState.cc
     librbd/ImageWatcher.cc
     librbd/internal.cc
     librbd/Journal.cc
@@ -888,12 +891,42 @@ if(${WITH_RBD})
     librbd/LibrbdAdminSocketHook.cc
     librbd/LibrbdWriteback.cc
     librbd/ObjectMap.cc
-    librbd/RebuildObjectMapRequest.cc
+    librbd/Utils.cc
+    librbd/exclusive_lock/AcquireRequest.cc
+    librbd/exclusive_lock/ReleaseRequest.cc
+    librbd/image/CloseRequest.cc
+    librbd/image/OpenRequest.cc
+    librbd/image/RefreshParentRequest.cc
+    librbd/image/RefreshRequest.cc
+    librbd/image/SetSnapRequest.cc
+    librbd/object_map/InvalidateRequest.cc
+    librbd/object_map/LockRequest.cc
+    librbd/object_map/Request.cc
+    librbd/object_map/RefreshRequest.cc
+    librbd/object_map/ResizeRequest.cc
+    librbd/object_map/SnapshotCreateRequest.cc
+    librbd/object_map/SnapshotRemoveRequest.cc
+    librbd/object_map/SnapshotRollbackRequest.cc
+    librbd/object_map/UnlockRequest.cc
+    librbd/object_map/UpdateRequest.cc
+    librbd/operation/FlattenRequest.cc
+    librbd/operation/RebuildObjectMapRequest.cc
+    librbd/operation/RenameRequest.cc
+    librbd/operation/Request.cc
+    librbd/operation/ResizeRequest.cc
+    librbd/operation/SnapshotCreateRequest.cc
+    librbd/operation/SnapshotProtectRequest.cc
+    librbd/operation/SnapshotRemoveRequest.cc
+    librbd/operation/SnapshotRenameRequest.cc
+    librbd/operation/SnapshotRollbackRequest.cc
+    librbd/operation/SnapshotUnprotectRequest.cc
+    librbd/operation/TrimRequest.cc
     librbd/WatchNotifyTypes.cc)
   add_library(librbd ${CEPH_SHARED} ${librbd_srcs}
     $<TARGET_OBJECTS:osdc_rbd_objs>
     $<TARGET_OBJECTS:common_util_obj>)
-  target_link_libraries(librbd PRIVATE librados common cls_lock_client cls_rbd_client
+  target_link_libraries(librbd PRIVATE librados common journal
+    cls_lock_client cls_rbd_client cls_journal_client
     ${CMAKE_DL_LIBS})
   if(${ENABLE_SHARED})
     set_target_properties(librbd PROPERTIES VERSION "1.0.0" SOVERSION "1"
@@ -922,10 +955,13 @@ if(${WITH_RBD})
     tools/rbd/action/Import.cc
     tools/rbd/action/ImportDiff.cc
     tools/rbd/action/Info.cc
+    tools/rbd/action/Journal.cc
     tools/rbd/action/Kernel.cc
     tools/rbd/action/List.cc
     tools/rbd/action/Lock.cc
     tools/rbd/action/MergeDiff.cc
+    tools/rbd/action/MirrorPool.cc
+    tools/rbd/action/Nbd.cc
     tools/rbd/action/ObjectMap.cc
     tools/rbd/action/Remove.cc
     tools/rbd/action/Rename.cc
@@ -1003,6 +1039,7 @@ if(${WITH_RADOSGW})
     rgw/rgw_rest_client.cc
     rgw/rgw_rest_conn.cc
     rgw/rgw_op.cc
+    rgw/rgw_basic_types.cc
     rgw/rgw_common.cc
     rgw/rgw_cache.cc
     rgw/rgw_formats.cc

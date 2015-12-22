@@ -66,8 +66,17 @@ std::string format_option_suffix(
 
 } // anonymous namespace
 
-std::vector<Shell::Action *> Shell::s_actions;
-std::set<std::string> Shell::s_switch_arguments;
+std::vector<Shell::Action *>& Shell::get_actions() {
+  static std::vector<Action *> actions;
+
+  return actions;
+}
+
+std::set<std::string>& Shell::get_switch_arguments() {
+  static std::set<std::string> switch_arguments;
+
+  return switch_arguments;
+}
 
 int Shell::execute(int arg_count, const char **arg_values) {
 
@@ -123,8 +132,11 @@ int Shell::execute(int arg_count, const char **arg_values) {
     po::positional_options_description positional_options;
     positional_options.add(at::POSITIONAL_COMMAND_SPEC.c_str(),
                            matching_spec->size());
-    if (command_spec.size() > matching_spec->size()) {
-      positional_options.add(at::POSITIONAL_ARGUMENTS.c_str(), -1);
+    if (!positional_opts.options().empty()) {
+      int max_count = positional_opts.options().size();
+      if (positional_opts.options().back()->semantic()->max_tokens() > 1)
+        max_count = -1;
+      positional_options.add(at::POSITIONAL_ARGUMENTS.c_str(), max_count);
     }
 
     po::options_description global_opts;
@@ -153,13 +165,13 @@ int Shell::execute(int arg_count, const char **arg_values) {
       return std::abs(r);
     }
   } catch (po::required_option& e) {
-    std::cerr << "rbd: " << e.what() << std::endl << std::endl;
+    std::cerr << "rbd: " << e.what() << std::endl;
     return EXIT_FAILURE;
   } catch (po::too_many_positional_options_error& e) {
-    std::cerr << "rbd: too many positional arguments or unrecognized optional "
-              << "argument" << std::endl;
+    std::cerr << "rbd: too many arguments" << std::endl;
+    return EXIT_FAILURE;
   } catch (po::error& e) {
-    std::cerr << "rbd: " << e.what() << std::endl << std::endl;
+    std::cerr << "rbd: " << e.what() << std::endl;
     return EXIT_FAILURE;
   }
 
@@ -184,9 +196,10 @@ void Shell::get_command_spec(const std::vector<std::string> &arguments,
     } else if (arg[0] == '-') {
       // if the option is not a switch, skip its value
       if (arg.size() >= 2 &&
-          (arg[1] == '-' || s_switch_arguments.count(arg.substr(1, 1)) == 0) &&
+          (arg[1] == '-' ||
+	   get_switch_arguments().count(arg.substr(1, 1)) == 0) &&
           (arg[1] != '-' ||
-             s_switch_arguments.count(arg.substr(2, std::string::npos)) == 0) &&
+	   get_switch_arguments().count(arg.substr(2, std::string::npos)) == 0) &&
           at::SWITCH_ARGUMENTS.count(arg.substr(2, std::string::npos)) == 0 &&
           arg.find('=') == std::string::npos) {
         ++i;
@@ -199,8 +212,8 @@ void Shell::get_command_spec(const std::vector<std::string> &arguments,
 
 Shell::Action *Shell::find_action(const CommandSpec &command_spec,
                                   CommandSpec **matching_spec) {
-  for (size_t i = 0; i < s_actions.size(); ++i) {
-    Action *action = s_actions[i];
+  for (size_t i = 0; i < get_actions().size(); ++i) {
+    Action *action = get_actions()[i];
     if (action->command_spec.size() <= command_spec.size()) {
       if (std::includes(action->command_spec.begin(),
                         action->command_spec.end(),
@@ -231,7 +244,7 @@ Shell::Action *Shell::find_action(const CommandSpec &command_spec,
 
 void Shell::get_global_options(po::options_description *opts) {
   opts->add_options()
-    ("conf,c", po::value<std::string>(), "path to cluster configuration")
+    ((at::CONFIG_PATH + ",c").c_str(), po::value<std::string>(), "path to cluster configuration")
     ("cluster", po::value<std::string>(), "cluster name")
     ("id", po::value<std::string>(), "client id (without 'client.' prefix)")
     ("user", po::value<std::string>(), "client id (without 'client.' prefix)")
@@ -274,7 +287,7 @@ void Shell::print_help() {
             << "Command-line interface for managing Ceph RBD images."
             << std::endl << std::endl;
 
-  std::vector<Action *> actions(s_actions);
+  std::vector<Action *> actions(get_actions());
   std::sort(actions.begin(), actions.end(),
             [](Action *lhs, Action *rhs) { return lhs->command_spec <
                                                     rhs->command_spec; });
@@ -365,8 +378,8 @@ void Shell::print_bash_completion(const CommandSpec &command_spec) {
     print_bash_completion_options(command_opts);
   } else {
     std::cout << "|help";
-    for (size_t i = 0; i < s_actions.size(); ++i) {
-      Action *action = s_actions[i];
+    for (size_t i = 0; i < get_actions().size(); ++i) {
+      Action *action = get_actions()[i];
       std::cout << "|"
                 << joinify<std::string>(action->command_spec.begin(),
                                         action->command_spec.end(), " ");
