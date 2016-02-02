@@ -411,11 +411,11 @@ add_library(librados ${CEPH_SHARED} ${librados_srcs}
   $<TARGET_OBJECTS:heap_profiler_objs>
   $<TARGET_OBJECTS:common_util_obj>)
 add_dependencies(librados osdc)
-target_link_libraries(librados PRIVATE osdc osd os global common cls_lock_client
+target_link_libraries(librados ${LINK_PRIVATE} osdc osd os global common cls_lock_client
   ${BLKID_LIBRARIES}
   ${CRYPTO_LIBS} ${EXTRALIBS} ${ALLOC_LIBS})
 if(${WITH_LTTNG})
-  target_link_libraries(librados PUBLIC librados_tp)
+  target_link_libraries(librados ${LINK_PUBLIC} librados_tp)
 endif(${WITH_LTTNG})
 if(${ENABLE_SHARED})
   set_target_properties(librados PROPERTIES OUTPUT_NAME rados VERSION 2.0.0
@@ -663,7 +663,7 @@ endif(${HAVE_LIBFUSE})
 # make rocksdb statically
 add_custom_target(build_rocksdb
     COMMAND 
-    PORTABLE=1 $(MAKE) static_lib EXTRA_CXXFLAGS='-fPIC -Wno-unused-variable'
+    EXTRA_CXXFLAGS=-fPIC PORTABLE=1 make static_lib
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/rocksdb
     COMMENT "rocksdb building")
 
@@ -910,7 +910,7 @@ if(WITH_LIBCEPHFS)
     $<TARGET_OBJECTS:cls_references_objs>
     $<TARGET_OBJECTS:heap_profiler_objs>
     $<TARGET_OBJECTS:common_util_obj>)
-  target_link_libraries(cephfs PRIVATE client osdc osd os global common cls_lock_client
+  target_link_libraries(cephfs ${LINK_PRIVATE} client osdc osd os global common cls_lock_client
     ${BLKID_LIBRARIES}
     ${CRYPTO_LIBS} ${EXTRALIBS} ${ALLOC_LIBS})
 if(${ENABLE_SHARED})
@@ -1023,11 +1023,11 @@ if(${WITH_RBD})
   add_library(librbd ${CEPH_SHARED} ${librbd_srcs}
     $<TARGET_OBJECTS:osdc_rbd_objs>
     $<TARGET_OBJECTS:common_util_obj>)
-  target_link_libraries(librbd PRIVATE librados common journal
+  target_link_libraries(librbd ${LINK_PRIVATE} librados common journal
     cls_lock_client cls_rbd_client cls_journal_client udev
     ${CMAKE_DL_LIBS})
   if(${WITH_LTTNG})
-    target_link_libraries(librbd PUBLIC librbd_tp)
+    target_link_libraries(librbd ${LINK_PUBLIC} librbd_tp)
   endif(${WITH_LTTNG})
   if(${ENABLE_SHARED})
     set_target_properties(librbd PROPERTIES VERSION "1.0.0" SOVERSION "1"
