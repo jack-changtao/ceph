@@ -225,14 +225,19 @@ OSDService::OSDService(OSD *osd) :
   sched_scrub_lock("OSDService::sched_scrub_lock"), scrubs_pending(0),
   scrubs_active(0),
   agent_lock("OSD::agent_lock"),
-  agent_valid_iterator(false),
+  //agent_valid_iterator(false),
   agent_ops(0),
   flush_mode_high_count(0),
   agent_active(true),
-  agent_thread(this),
   agent_stop_flag(false),
   agent_timer_lock("OSD::agent_timer_lock"),
   agent_timer(osd->client_messenger->cct, agent_timer_lock),
+  agent_tp(cct, "OSD::agent_tp", "tp_osd_recov", cct->_conf->osd_agent_threads, "osd_agent_threads"),
+  agent_wq(
+     this,
+     cct->_conf->osd_recovery_thread_timeout,
+     cct->_conf->osd_recovery_thread_suicide_timeout,
+     &agent_tp),
   objecter(new Objecter(osd->client_messenger->cct, osd->objecter_messenger, osd->monc, NULL, 0, 0)),
   objecter_finisher(osd->client_messenger->cct),
   watch_lock("OSD::watch_lock"),
@@ -484,8 +489,8 @@ void OSDService::init()
   objecter->set_client_incarnation(0);
   watch_timer.init();
   agent_timer.init();
-
-  agent_thread.create("osd_srv_agent");
+  agent_tp.start();
+  //agent_thread.create("osd_srv_agent");
 }
 
 void OSDService::final_init()
@@ -513,60 +518,28 @@ public:
   }
 };
 
-void OSDService::agent_entry()
+void OSDService::agent_entry(PGRef pg)
 {
-  dout(10) << __func__ << " start" << dendl;
   agent_lock.Lock();
-
-  while (!agent_stop_flag) {
-    if (agent_queue.empty()) {
-      dout(20) << __func__ << " empty queue" << dendl;
-      agent_cond.Wait(agent_lock);
-      continue;
-    }
-    uint64_t level = agent_queue.rbegin()->first;
-    set<PGRef>& top = agent_queue.rbegin()->second;
-    dout(10) << __func__
-	     << " tiers " << agent_queue.size()
-	     << ", top is " << level
-	     << " with pgs " << top.size()
-	     << ", ops " << agent_ops << "/"
-	     << g_conf->osd_agent_max_ops
-	     << (agent_active ? " active" : " NOT ACTIVE")
-	     << dendl;
-    dout(20) << __func__ << " oids " << agent_oids << dendl;
-    if (agent_ops >= g_conf->osd_agent_max_ops || top.empty() ||
-	!agent_active) {
-      agent_cond.Wait(agent_lock);
-      continue;
-    }
-
-    if (!agent_valid_iterator || agent_queue_pos == top.end()) {
-      agent_queue_pos = top.begin();
-      agent_valid_iterator = true;
-    }
-    PGRef pg = *agent_queue_pos;
-    int max = g_conf->osd_agent_max_ops - agent_ops;
-    int agent_flush_quota = max;
-    if (!flush_mode_high_count)
-      agent_flush_quota = g_conf->osd_agent_max_low_ops - agent_ops;
-    dout(10) << "high_count " << flush_mode_high_count << " agent_ops " << agent_ops << " flush_quota " << agent_flush_quota << dendl;
-    agent_lock.Unlock();
-    if (!pg->agent_work(max, agent_flush_quota)) {
-      dout(10) << __func__ << " " << pg->get_pgid()
-	<< " no agent_work, delay for " << g_conf->osd_agent_delay_time
-	<< " seconds" << dendl;
-
-      osd->logger->inc(l_osd_tier_delay);
-      // Queue a timer to call agent_choose_mode for this pg in 5 seconds
-      agent_timer_lock.Lock();
-      Context *cb = new AgentTimeoutCB(pg);
-      agent_timer.add_event_after(g_conf->osd_agent_delay_time, cb);
-      agent_timer_lock.Unlock();
-    }
-    agent_lock.Lock();
-  }
+  int max = g_conf->osd_agent_max_ops - agent_ops;
+  int agent_flush_quota = max;
+  if (!flush_mode_high_count)
+    agent_flush_quota = g_conf->osd_agent_max_low_ops - agent_ops;
+  dout(10) << "high_count " << flush_mode_high_count << " agent_ops " << agent_ops << " flush_quota " << agent_flush_quota << dendl;
   agent_lock.Unlock();
+  
+  if (!pg->agent_work(max, agent_flush_quota)) {
+    dout(10) << __func__ << " " << pg->get_pgid()
+    << " no agent_work, delay for " << g_conf->osd_agent_delay_time
+    << " seconds" << dendl;
+    
+    osd->logger->inc(l_osd_tier_delay);
+    // Queue a timer to call agent_choose_mode for this pg in 5 seconds
+    agent_timer_lock.Lock();
+    Context *cb = new AgentTimeoutCB(pg);
+    agent_timer.add_event_after(g_conf->osd_agent_delay_time, cb);
+    agent_timer_lock.Unlock();
+  }
   dout(10) << __func__ << " finish" << dendl;
 }
 
@@ -579,15 +552,15 @@ void OSDService::agent_stop()
     assert(agent_ops == 0);
     // By this time all PGs are shutdown and dequeued
     if (!agent_queue.empty()) {
-      set<PGRef>& top = agent_queue.rbegin()->second;
-      derr << "agent queue not empty, for example " << (*top.begin())->info.pgid << dendl;
+      //set<PGRef>& top = agent_queue.rbegin()->second;
+      //derr << "agent queue not empty, for example " << (*top.begin())->info.pgid << dendl;
       assert(0 == "agent queue not empty");
     }
 
     agent_stop_flag = true;
     agent_cond.Signal();
   }
-  agent_thread.join();
+  //agent_thread.join();
 }
 
 // -------------------------------------
