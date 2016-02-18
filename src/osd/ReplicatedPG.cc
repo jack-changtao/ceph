@@ -11987,8 +11987,14 @@ bool ReplicatedPG::agent_choose_mode(bool restart, OpRequestRef op)
     flush_high_target -= MIN(flush_high_target, flush_slop);
   }
 
+  dout(20) << __func__ << " dirty_micro " << ((float)dirty_micro)
+	   << " full_miro " << ((float)full_micro )
+	   << " flush_target " <<flush_target
+	   << " flush_hiht_target " << flush_high_target << dendl;
+  
   if (dirty_micro > flush_high_target) {
     flush_mode = TierAgentState::FLUSH_MODE_HIGH;
+    
   } else if (dirty_micro > flush_target) {
     flush_mode = TierAgentState::FLUSH_MODE_LOW;
   }
@@ -12089,12 +12095,16 @@ bool ReplicatedPG::agent_choose_mode(bool restart, OpRequestRef op)
   // correlated) but it is not precisely correct.
   if (agent_state->is_idle()) {
     if (!restart && !old_idle) {
+      dout(5) <<" disable  "<< agent_state->evict_effort <<dendl;
       osd->agent_disable_pg(this, old_effort);
     }
   } else {
     if (restart || old_idle) {
+      dout(5) <<" new add effort  "<< agent_state->evict_effort <<dendl;
       osd->agent_enable_pg(this, agent_state->evict_effort);
     } else if (old_effort != agent_state->evict_effort) {
+      dout(5) <<" change effort from "<< old_effort<<" to "
+      	      << agent_state->evict_effort<<dendl;
       osd->agent_adjust_pg(this, old_effort, agent_state->evict_effort);
     }
   }

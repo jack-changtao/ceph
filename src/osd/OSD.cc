@@ -505,7 +505,7 @@ void OSDService::activate_map()
   agent_active =
     !osdmap->test_flag(CEPH_OSDMAP_NOTIERAGENT) &&
     osd->is_active();
-  agent_cond.Signal();
+  //agent_cond.Signal();
   agent_lock.Unlock();
 }
 
@@ -520,15 +520,27 @@ public:
 
 void OSDService::agent_entry(PGRef pg)
 {
-  agent_lock.Lock();
-  int max = g_conf->osd_agent_max_ops - agent_ops;
-  int agent_flush_quota = max;
-  if (!flush_mode_high_count)
-    agent_flush_quota = g_conf->osd_agent_max_low_ops - agent_ops;
-  dout(10) << "high_count " << flush_mode_high_count << " agent_ops " << agent_ops << " flush_quota " << agent_flush_quota << dendl;
-  agent_lock.Unlock();
+  int agent_flush_quota;
+  int max;
+  {
+    Mutex::Locker l(agent_lock);
+    if(agent_stop_flag || !agent_active)
+      return ;
+    
+    max = g_conf->osd_agent_max_ops - agent_ops;
+    agent_flush_quota = max;
   
-  if (!pg->agent_work(max, agent_flush_quota)) {
+    if (!flush_mode_high_count){
+      agent_flush_quota = g_conf->osd_agent_max_low_ops - agent_ops;
+    }
+    
+    dout(10) << __func__ << " high_count " << flush_mode_high_count
+    	     << " agent_ops " << agent_ops << 
+    	     " flush_quota " << agent_flush_quota << dendl;
+  }
+
+  // if agent_ops > g_conf->osd_agent_max_ops, it should wait for 5 seconds
+  if (agent_flush_quota <= 0 || !pg->agent_work(max, agent_flush_quota)) {
     dout(10) << __func__ << " " << pg->get_pgid()
     << " no agent_work, delay for " << g_conf->osd_agent_delay_time
     << " seconds" << dendl;
@@ -547,20 +559,19 @@ void OSDService::agent_stop()
 {
   {
     Mutex::Locker l(agent_lock);
-
     // By this time all ops should be cancelled
-    assert(agent_ops == 0);
-    // By this time all PGs are shutdown and dequeued
-    if (!agent_queue.empty()) {
-      //set<PGRef>& top = agent_queue.rbegin()->second;
-      //derr << "agent queue not empty, for example " << (*top.begin())->info.pgid << dendl;
-      assert(0 == "agent queue not empty");
-    }
-
+    //assert(agent_ops == 0);
     agent_stop_flag = true;
-    agent_cond.Signal();
+    //agent_cond.Signal();
   }
-  //agent_thread.join();
+  agent_tp.drain();
+  agent_tp.stop();
+  // By this time all PGs are shutdown and dequeued
+  if (!agent_queue.empty()) {
+    //set<PGRef>& top = agent_queue.rbegin()->second;
+    //derr << "agent queue not empty, for example " << (*top.begin())->info.pgid << dendl;
+    assert(0 == "agent queue not empty");
+  }
 }
 
 // -------------------------------------

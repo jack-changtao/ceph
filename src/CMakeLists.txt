@@ -720,7 +720,7 @@ if(WITH_SPDK)
     ${DPDK_LIBRARIES}
     ${PCIACCESS_LIBRARIES})
   target_include_directories(os
-    PRIVATE
+    LINK_PRIVATE
     ${DPDK_INCLUDE_DIR}
     ${PCIACCESS_INCLUDE_DIR})
 endif(WITH_SPDK)
@@ -1218,7 +1218,7 @@ if(${WITH_RADOSGW})
     )
 
   add_library(rgw SHARED ${librgw_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
-  target_link_libraries(rgw PRIVATE
+  target_link_libraries(rgw LINK_PRIVATE
     rgw_a
     librados
     cls_rgw_client
