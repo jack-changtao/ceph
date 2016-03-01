@@ -121,6 +121,8 @@ uint64_t JournalingObjectStore::ApplyManager::op_apply_start(uint64_t op)
   dout(10) << "op_apply_start " << op << " open_ops " << open_ops << " -> " << (open_ops+1) << dendl;
   assert(op > committed_seq);
   open_ops++;
+  pthread_t pid = pthread_self();
+  applying_seq[pid].set(op);
   return op;
 }
 
@@ -134,6 +136,8 @@ void JournalingObjectStore::ApplyManager::op_apply_finish(uint64_t op)
   --open_ops;
   assert(open_ops >= 0);
 
+  pthread_t pid = pthread_self();
+  applying_seq.erase(pid);
   // there can be multiple applies in flight; track the max value we
   // note.  note that we can't _read_ this value and learn anything
   // meaningful unless/until we've quiesced all in-flight applies.
@@ -174,37 +178,40 @@ void JournalingObjectStore::ApplyManager::add_waiter(uint64_t op, Context *c)
 bool JournalingObjectStore::ApplyManager::commit_start()
 {
   bool ret = false;
-
   uint64_t _committing_seq = 0;
   {
     Mutex::Locker l(apply_lock);
     dout(10) << "commit_start max_applied_seq " << max_applied_seq
-	     << ", open_ops " << open_ops
-	     << dendl;
-    blocked = true;
-    while (open_ops > 0) {
-      dout(10) << "commit_start waiting for " << open_ops << " open ops to drain" << dendl;
-      blocked_cond.Wait(apply_lock);
-    }
-    assert(open_ops == 0);
-    dout(10) << "commit_start blocked, all open_ops have completed" << dendl;
-    {
-      Mutex::Locker l(com_lock);
-      if (max_applied_seq == committed_seq) {
-	dout(10) << "commit_start nothing to do" << dendl;
-	blocked = false;
-	assert(commit_waiters.empty());
-	goto out;
+	     << ", open_ops " << open_ops << dendl;
+
+    if (applying_seq.size()==0 ) {
+    	_committing_seq = max_applied_seq; 	
+	dout(10) << __func__ << " _committing_seq from max_applied_seq: "
+		 << _committing_seq << dendl;     
+    } else {
+      map<pthread_t,atomic64_t>::iterator it = applying_seq.begin();
+      _committing_seq = it->second.read();
+      while (++it != applying_seq.end()) {
+      	if (_committing_seq  > it->second.read()) {
+	  _committing_seq  = it->second.read();
+      	}
       }
+      _committing_seq =  _committing_seq - 1 ;
+      dout(10) << __func__ << " _committing_seq from min applying seq: " 
+       	       << committing_seq << dendl;
+    	  
+      assert( (int)applying_seq.size() == open_ops );
+     }
+   }
 
-      _committing_seq = committing_seq = max_applied_seq;
-
-      dout(10) << "commit_start committing " << committing_seq
-	       << ", still blocked" << dendl;
-    }
-  }
-  ret = true;
-
+   Mutex::Locker l(com_lock);
+   {
+     committing_seq = _committing_seq;
+     if (committing_seq == committed_seq) {
+       dout(10) << "commit_start nothing to do" << dendl;
+       goto out;
+     }
+   } 
  out:
   if (journal)
     journal->commit_start(_committing_seq);  // tell the journal too
