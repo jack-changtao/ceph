@@ -256,13 +256,19 @@ private:
       }
     }
 
+    uint64_t dequeue_seq() {
+      Mutex::Locker l(qlock);
+      uint64_t seq =  jq.front();
+      jq.pop_front();
+      return seq;
+    }
+
     void queue_journal(uint64_t s) {
       Mutex::Locker l(qlock);
       jq.push_back(s);
     }
     void dequeue_journal(list<Context*> *to_queue) {
       Mutex::Locker l(qlock);
-      jq.pop_front();
       cond.Signal();
       _wake_flush_waiters(to_queue);
     }
