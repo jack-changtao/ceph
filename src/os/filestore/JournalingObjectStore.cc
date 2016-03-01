@@ -201,8 +201,14 @@ bool JournalingObjectStore::ApplyManager::commit_start()
        	       << committing_seq << dendl;
     	  
       assert( (int)applying_seq.size() == open_ops );
-     }
-   }
+    }
+
+    if (g_conf->filestore_journal_parallel) {
+       uint64_t journaled_seq = journal->get_journaled_seq();
+       if (journaled_seq < _committing_seq )
+	  _committing_seq = journaled_seq;
+    }
+  }
 
    Mutex::Locker l(com_lock);
    {
